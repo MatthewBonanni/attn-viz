@@ -45,6 +45,12 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
     const d_k = shK[shK.length - 1];
     const d_v = V.shape[V.shape.length - 1];
 
+    // Detect GQA: K_cache has fewer heads than Q
+    const kCache = tensorMap['K_cache'];
+    const n_kv = (kCache && kCache.shape.length >= 3) ? kCache.shape[0] : n_h;
+    const isGQA = n_kv < n_h && n_h % n_kv === 0;
+    const G = isGQA ? Math.floor(n_h / n_kv) : 1; // heads per KV group
+
     // State for interactive selection
     let selectedQBlock = 0;
     let selectedKVBlock = 0;
@@ -57,7 +63,7 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
         .attr('class', 'flash-controls')
         .style('margin-bottom', '12px');
 
-    buildHTMLControls(controlsDiv, params, () => redraw());
+    buildHTMLControls(controlsDiv, params, isGQA, () => redraw());
 
     // --- SVG sections ---
     function redraw() {
@@ -70,11 +76,11 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
         if (selectedKVBlock >= nKV) selectedKVBlock = nKV - 1;
 
         let sY = 10;
-        sY = drawPerHeadOverview(svg, pad, sY, w - 2 * pad, n_h, S_q, S, d_q, d_v, Q, K, V, outputTensor);
+        sY = drawPerHeadOverview(svg, pad, sY, w - 2 * pad, n_h, S_q, S, d_q, d_v, Q, K, V, outputTensor, isGQA, G, n_kv, params);
 
         sY += 16;
         sY = drawCTAGrid(svg, pad, sY, w - 2 * pad, params, S_q, S, nQ, nKV,
-            selectedQBlock, selectedKVBlock, (qi, kvi) => {
+            selectedQBlock, selectedKVBlock, isGQA, G, n_kv, (qi, kvi) => {
                 selectedQBlock = qi;
                 selectedKVBlock = kvi;
                 redraw();
@@ -86,11 +92,11 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
 
         sY += 16;
         sY = drawTileComputation(svg, pad, sY, w - 2 * pad, params, Q, K, V, outputTensor,
-            S_q, S, d_q, d_k, d_v, selectedQBlock, selectedKVBlock, nKV);
+            S_q, S, d_q, d_k, d_v, selectedQBlock, selectedKVBlock, nKV, isGQA, G, n_kv);
 
         sY += 16;
         sY = drawMemoryHierarchy(svg, pad, sY, w - 2 * pad, params, Q, K, V, outputTensor,
-            S_q, S, d_q, d_k, d_v, selectedQBlock, selectedKVBlock);
+            S_q, S, d_q, d_k, d_v, selectedQBlock, selectedKVBlock, isGQA, G, n_kv);
 
         if (params.splitKV && nKV > 1) {
             sY += 16;
@@ -100,7 +106,7 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
         svg.attr('height', sY + 20);
 
         // Update stats in controls
-        updateControlStats(controlsDiv, params, S_q, S, op, tensorMap);
+        updateControlStats(controlsDiv, params, S_q, S, op, tensorMap, isGQA, G, n_kv);
     }
 
     redraw();
@@ -108,7 +114,7 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
 
 // --- HTML controls (inserted above SVG in detail panel) ---
 
-function buildHTMLControls(container, params, onChange) {
+function buildHTMLControls(container, params, isGQA, onChange) {
     container.selectAll('*').remove();
 
     const row = container.append('div')
@@ -124,19 +130,36 @@ function buildHTMLControls(container, params, onChange) {
     buildHTMLSlider(row, 'B_c (KV tile)', params, 'block_kv', 16, 256, 16, onChange);
 
     // Split-KV toggle
-    const toggleGroup = row.append('div').style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
-    toggleGroup.append('span')
+    const splitGroup = row.append('div').style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
+    splitGroup.append('span')
         .style('font-size', '11px').style('color', '#bbb').style('font-weight', '500')
         .text('Split-KV');
-    const toggle = toggleGroup.append('div')
+    const splitToggle = splitGroup.append('div')
         .attr('class', 'toggle-switch')
         .classed('active', params.splitKV)
         .style('cursor', 'pointer');
-    toggle.on('click', function() {
+    splitToggle.on('click', function() {
         params.splitKV = !params.splitKV;
         d3.select(this).classed('active', params.splitKV);
         onChange();
     });
+
+    // PackGQA toggle (only visible for GQA variants)
+    if (isGQA) {
+        const packGroup = row.append('div').style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
+        packGroup.append('span')
+            .style('font-size', '11px').style('color', '#bbb').style('font-weight', '500')
+            .text('PackGQA');
+        const packToggle = packGroup.append('div')
+            .attr('class', 'toggle-switch')
+            .classed('active', params.packGQA)
+            .style('cursor', 'pointer');
+        packToggle.on('click', function() {
+            params.packGQA = !params.packGQA;
+            d3.select(this).classed('active', params.packGQA);
+            onChange();
+        });
+    }
 
     // Stats area
     container.append('div')
@@ -153,10 +176,11 @@ function _fmtTime(seconds) {
     return seconds.toFixed(3) + ' s';
 }
 
-function updateControlStats(container, params, S_q, S, op, tensorMap) {
+function updateControlStats(container, params, S_q, S, op, tensorMap, isGQA, G, n_kv) {
     const Br = params.block_q, Bc = params.block_kv;
     const nQ = Math.ceil(S_q / Br);
     const nKV = Math.ceil(S / Bc);
+    const packed = isGQA && params.packGQA;
     const nCTAs = params.splitKV ? nQ * nKV : nQ;
 
     const stats = container.select('.flash-stats');
@@ -167,12 +191,26 @@ function updateControlStats(container, params, S_q, S, op, tensorMap) {
     tilingLine.append('span')
         .style('color', '#888')
         .text(`${nQ} Q blocks \u00d7 ${nKV} KV blocks \u2014 `);
-    tilingLine.append('span')
-        .style('color', '#7c8cf8').style('font-weight', '600')
-        .text(`${nCTAs} CTAs${params.splitKV ? ' (split-KV)' : ''} per head`);
+    if (packed) {
+        tilingLine.append('span')
+            .style('color', '#7c8cf8').style('font-weight', '600')
+            .text(`${nCTAs} CTAs${params.splitKV ? ' (split-KV)' : ''} per KV group`);
+        tilingLine.append('span')
+            .style('color', '#e67e22').style('margin-left', '8px').style('font-weight', '600')
+            .text(`\u00d7 ${n_kv} groups = ${nCTAs * n_kv} total`);
+    } else {
+        tilingLine.append('span')
+            .style('color', '#7c8cf8').style('font-weight', '600')
+            .text(`${nCTAs} CTAs${params.splitKV ? ' (split-KV)' : ''} per head`);
+    }
     tilingLine.append('span')
         .style('color', '#666').style('margin-left', '8px')
         .text(params.splitKV ? '(each CTA: 1 Q block \u00d7 1 KV block)' : '(each CTA iterates all KV blocks)');
+    if (packed) {
+        tilingLine.append('span')
+            .style('color', '#e67e22').style('margin-left', '8px')
+            .text(`(${G} heads packed per CTA)`);
+    }
 
     // Cost + GPU timing
     const cost = computeOpCost(op, tensorMap);
@@ -267,7 +305,7 @@ function buildHTMLSlider(container, label, params, key, min, max, step, onChange
 // Uses the same shared-hinge proportional matmul layout as Tensor Mapping,
 // but with depth-stacked layers showing n_h heads (front head highlighted).
 
-function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O) {
+function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, isGQA, G, n_kv, params) {
     const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
 
     sectionG.append('text')
@@ -468,13 +506,19 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O) 
     }
 
     // Bottom annotation
-    const headText = n_h > 1
-        ? `Showing 1 of ${n_h} heads \u2014 repeated independently for each head`
-        : 'Single head (n_h = 1)';
+    const packed = isGQA && params.packGQA;
+    let headText;
+    if (packed) {
+        headText = `PackGQA: ${G} query heads share 1 KV head \u2014 ${n_kv} groups, each CTA processes ${G} heads`;
+    } else if (n_h > 1) {
+        headText = `Showing 1 of ${n_h} heads \u2014 repeated independently for each head`;
+    } else {
+        headText = 'Single head (n_h = 1)';
+    }
     sectionG.append('text')
         .attr('x', width / 2).attr('y', annoY)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#f39c12').attr('font-size', '10px').attr('font-style', 'italic')
+        .attr('fill', packed ? '#e67e22' : '#f39c12').attr('font-size', '10px').attr('font-style', 'italic')
         .text(headText);
 
     return y + annoY + 8;
@@ -483,17 +527,21 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O) 
 // --- Section A: CTA Grid ---
 
 function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
-                     selectedQ, selectedKV, onSelect) {
+                     selectedQ, selectedKV, isGQA, G, n_kv, onSelect) {
     const Br = params.block_q, Bc = params.block_kv;
     const splitKV = params.splitKV;
+    const packed = isGQA && params.packGQA;
 
     const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
 
     // Section title
+    const titleText = packed
+        ? `CTA Assignment (per KV group \u2014 ${G} heads packed)`
+        : 'CTA Assignment';
     sectionG.append('text')
         .attr('x', 0).attr('y', 14)
-        .attr('fill', '#bbb').attr('font-size', '12px').attr('font-weight', '600')
-        .text('CTA Assignment');
+        .attr('fill', packed ? '#e67e22' : '#bbb').attr('font-size', '12px').attr('font-weight', '600')
+        .text(titleText);
 
     const titleH = 24;
     const labelW = 60;
@@ -676,7 +724,19 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     const kvRange = `[${selectedKV * Bc}..${Math.min((selectedKV + 1) * Bc, S) - 1}]`;
     selInfo.text(`Selected: Q rows ${qRange}, KV rows ${kvRange}`);
 
-    return y + gridY + gridH + 28;
+    let bottomY = gridY + gridH + 28;
+
+    // PackGQA annotation
+    if (packed) {
+        sectionG.append('text')
+            .attr('x', width / 2).attr('y', legendY + 22)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#e67e22').attr('font-size', '9px').attr('font-style', 'italic')
+            .text(`Each CTA processes ${G} query heads (h₀..h₍${G-1}₎) sharing the same KV head \u2014 K/V tiles loaded once per group`);
+        bottomY += 16;
+    }
+
+    return y + bottomY;
 }
 
 // --- Section B: Tensor Mapping ---
@@ -987,21 +1047,20 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
 // --- Section C: Tile Computation View ---
 
 function drawTileComputation(g, x, y, width, params, Q, K, V, O,
-                             S_q, S, d_q, d_k, d_v, selQ, selKV, numKVBlocks) {
+                             S_q, S, d_q, d_k, d_v, selQ, selKV, numKVBlocks, isGQA, G, n_kv) {
     const Br = params.block_q, Bc = params.block_kv;
-    // Actual tile sizes for the selected block (last block may be partial)
     const actBr = Math.min(Br, S_q - selQ * Br);
     const actBc = Math.min(Bc, S - selKV * Bc);
+    const packed = isGQA && params.packGQA;
 
     const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
 
     sectionG.append('text')
         .attr('x', 0).attr('y', 14)
-        .attr('fill', '#bbb').attr('font-size', '12px').attr('font-weight', '600')
+        .attr('fill', packed ? '#e67e22' : '#bbb').attr('font-size', '12px').attr('font-weight', '600')
         .text(`Tile Computation — CTA ${params.splitKV ? selQ * numKVBlocks + selKV : selQ}, ` +
               `iteration ${selKV + 1}/${numKVBlocks}`);
 
-    // Row range labels
     const qRowStart = selQ * Br, qRowEnd = qRowStart + actBr - 1;
     const kvRowStart = selKV * Bc, kvRowEnd = kvRowStart + actBc - 1;
     sectionG.append('text')
@@ -1013,59 +1072,84 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
     const midX = width / 2;
     const sameKV = K.id === V.id;
 
-    // --- Proportional sizing ---
-    // All dimensions that appear: actBr, actBc, d_q, d_k, d_v
-    // We map the largest dimension to a max pixel size and scale the rest.
     const allDims = [actBr, actBc, d_q, d_k, d_v];
     const maxDim = Math.max(...allDims);
-    const minPx = 24;   // minimum block dimension in pixels
-    const maxPx = 90;   // maximum block dimension in pixels
+    const minPx = 24;
+    const maxPx = packed ? 70 : 90; // slightly smaller when packed to fit G heads
     function dimToPx(d) { return Math.max(minPx, (d / maxDim) * maxPx); }
 
-    // Block sizes
-    const qW = dimToPx(d_q), qH = dimToPx(actBr);     // Q_i  [actBr × d_q]
-    const kW = dimToPx(d_k), kH = dimToPx(actBc);      // K_j  [actBc × d_k]
-    const vW = dimToPx(d_v), vH = dimToPx(actBc);      // V_j  [actBc × d_v]
-    const sW = dimToPx(actBc), sH = dimToPx(actBr);    // S_ij [actBr × actBc]
-    const oW = dimToPx(d_v), oH = dimToPx(actBr);      // O_i  [actBr × d_v]
+    const qW = dimToPx(d_q), qH = dimToPx(actBr);
+    const kW = dimToPx(d_k), kH = dimToPx(actBc);
+    const vW = dimToPx(d_v), vH = dimToPx(actBc);
+    const sW = dimToPx(actBc), sH = dimToPx(actBr);
+    const oW = dimToPx(d_v), oH = dimToPx(actBr);
 
-    // Left: Q_i block (loaded once from HBM)
+    // --- PackGQA: show G stacked query heads on the left ---
+    const numShown = packed ? Math.min(G, 4) : 1; // show up to 4 heads
+    const stackOff = packed ? 5 : 0; // px offset per stacked head
+    const totalStackH = (numShown - 1) * stackOff;
+
+    // Left: Q_i block(s) (loaded once from HBM)
     const qX = PAD, qY = topY + 10;
-    drawTileBlock(sectionG, qX, qY, qW, qH, '#e74c3c', `Q_i`, `[${actBr}, ${d_q}]`);
-    sectionG.append('text').attr('x', qX + qW / 2).attr('y', qY + qH + 14)
-        .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
-        .text('HBM \u2192 SMEM (once)');
+    if (packed) {
+        // Draw stacked Q tiles for each head in the group
+        for (let hi = numShown - 1; hi >= 0; hi--) {
+            const ox = hi * stackOff;
+            const oy = -hi * stackOff;
+            const opacity = hi === 0 ? 0.7 : 0.25;
+            drawTileBlock(sectionG, qX + ox, qY + oy, qW, qH, '#e74c3c',
+                hi === 0 ? `Q_i^(h0)` : `Q_i^(h${hi})`, hi === 0 ? `[${actBr}, ${d_q}]` : null, opacity);
+        }
+        sectionG.append('text').attr('x', qX + qW / 2 + totalStackH / 2).attr('y', qY + qH + 14)
+            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '9px')
+            .text(`${G} heads \u2192 SMEM`);
+    } else {
+        drawTileBlock(sectionG, qX, qY, qW, qH, '#e74c3c', `Q_i`, `[${actBr}, ${d_q}]`);
+        sectionG.append('text').attr('x', qX + qW / 2).attr('y', qY + qH + 14)
+            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
+            .text('HBM \u2192 SMEM (once)');
+    }
 
-    // Right: K_j and V_j blocks (loaded each iter)
+    // Right: K_j and V_j blocks (loaded each iter — shared across G heads when packed)
     const kvX = width - Math.max(kW, vW) - PAD;
     const kjY = topY;
     drawTileBlock(sectionG, kvX, kjY, kW, kH, '#2ecc71', `K_j`, `[${actBc}, ${d_k}]`);
+    const kvNote = packed ? `HBM \u2192 SMEM (shared \u00d7${G})` : 'HBM \u2192 SMEM (each iter)';
     sectionG.append('text').attr('x', kvX + kW / 2).attr('y', kjY + kH + 14)
-        .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
-        .text('HBM \u2192 SMEM (each iter)');
+        .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '9px')
+        .text(kvNote);
 
     const vjY = kjY + kH + 24;
     if (!sameKV) {
         drawTileBlock(sectionG, kvX, vjY, vW, vH, '#f39c12', `V_j`, `[${actBc}, ${d_v}]`);
         sectionG.append('text').attr('x', kvX + vW / 2).attr('y', vjY + vH + 14)
-            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
-            .text('HBM \u2192 SMEM (each iter)');
+            .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '9px')
+            .text(kvNote);
     }
 
     // Center: SRAM computation
     const sramX = midX - sW / 2;
     const sramY1 = topY + 5;
 
-    // S_ij = Q_i @ K_j^T
-    drawTileBlock(sectionG, sramX, sramY1, sW, sH, '#9b59b6', `S_ij`, `[${actBr}, ${actBc}]`);
+    if (packed) {
+        // Show stacked S/P tiles for each head
+        for (let hi = numShown - 1; hi >= 0; hi--) {
+            const ox = hi * stackOff;
+            const oy = -hi * stackOff;
+            drawTileBlock(sectionG, sramX + ox, sramY1 + oy, sW, sH, '#9b59b6',
+                hi === 0 ? `S_ij^(h0)` : '', null, hi === 0 ? 0.7 : 0.25);
+        }
+    } else {
+        drawTileBlock(sectionG, sramX, sramY1, sW, sH, '#9b59b6', `S_ij`, `[${actBr}, ${actBc}]`);
+    }
     sectionG.append('text').attr('x', midX).attr('y', sramY1 - 6)
         .attr('text-anchor', 'middle').attr('fill', '#9b59b6').attr('font-size', '9px').attr('font-weight', '600')
         .text('SRAM only');
 
     // Arrow Q -> S
-    drawArrow(sectionG, qX + qW, qY + qH / 2, sramX, sramY1 + sH / 2, '#e74c3c');
+    drawArrow(sectionG, qX + qW + totalStackH, qY + qH / 2, sramX, sramY1 + sH / 2, '#e74c3c');
     // Arrow K -> S
-    drawArrow(sectionG, kvX, kjY + kH * 0.4, sramX + sW, sramY1 + sH / 2, '#2ecc71');
+    drawArrow(sectionG, kvX, kjY + kH * 0.4, sramX + sW + totalStackH, sramY1 + sH / 2, '#2ecc71');
 
     // Softmax label
     const softY = sramY1 + sH + 8;
@@ -1076,30 +1160,49 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
         .attr('x1', midX).attr('y1', sramY1 + sH).attr('x2', midX).attr('y2', softY)
         .attr('stroke', '#555').attr('stroke-width', 1);
 
-    // P_ij (attention weights, also SRAM)
+    // P_ij
     const pY = softY + 18;
-    drawTileBlock(sectionG, sramX, pY, sW, sH, '#9b59b6', `P_ij`, `[${actBr}, ${actBc}]`);
+    if (packed) {
+        for (let hi = numShown - 1; hi >= 0; hi--) {
+            const ox = hi * stackOff;
+            const oy = -hi * stackOff;
+            drawTileBlock(sectionG, sramX + ox, pY + oy, sW, sH, '#9b59b6',
+                hi === 0 ? `P_ij^(h0)` : '', null, hi === 0 ? 0.7 : 0.25);
+        }
+    } else {
+        drawTileBlock(sectionG, sramX, pY, sW, sH, '#9b59b6', `P_ij`, `[${actBr}, ${actBc}]`);
+    }
 
-    // Arrow from softmax to P
     sectionG.append('line')
         .attr('x1', midX).attr('y1', softY + 12).attr('x2', midX).attr('y2', pY)
         .attr('stroke', '#555').attr('stroke-width', 1);
 
-    // Arrow V -> P (for P @ V computation)
+    // Arrow V -> P
     if (!sameKV) {
-        drawArrow(sectionG, kvX, vjY + vH * 0.4, sramX + sW, pY + sH * 0.4, '#f39c12');
+        drawArrow(sectionG, kvX, vjY + vH * 0.4, sramX + sW + totalStackH, pY + sH * 0.4, '#f39c12');
     } else {
-        // absorbed MLA: same tensor (c_KV) is both K and V
-        drawArrow(sectionG, kvX, kjY + kH * 0.6, sramX + sW, pY + sH * 0.4, '#f39c12');
+        drawArrow(sectionG, kvX, kjY + kH * 0.6, sramX + sW + totalStackH, pY + sH * 0.4, '#f39c12');
     }
 
-    // O_i accumulator
+    // O_i accumulator(s)
     const oY = pY + sH + 14;
     const oX = midX - oW / 2;
-    drawTileBlock(sectionG, oX, oY, oW, oH, '#3498db', `O_i`, `[${actBr}, ${d_v}]`);
-    sectionG.append('text').attr('x', midX).attr('y', oY + oH + 14)
-        .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
-        .text('Accumulator (registers)');
+    if (packed) {
+        for (let hi = numShown - 1; hi >= 0; hi--) {
+            const ox = hi * stackOff;
+            const oy = -hi * stackOff;
+            drawTileBlock(sectionG, oX + ox, oY + oy, oW, oH, '#3498db',
+                hi === 0 ? `O_i^(h0)` : '', hi === 0 ? `[${actBr}, ${d_v}]` : null, hi === 0 ? 0.7 : 0.25);
+        }
+        sectionG.append('text').attr('x', midX).attr('y', oY + oH + 14)
+            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '9px')
+            .text(`${G} accumulators (registers)`);
+    } else {
+        drawTileBlock(sectionG, oX, oY, oW, oH, '#3498db', `O_i`, `[${actBr}, ${d_v}]`);
+        sectionG.append('text').attr('x', midX).attr('y', oY + oH + 14)
+            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
+            .text('Accumulator (registers)');
+    }
 
     // Arrow P -> O
     sectionG.append('line')
@@ -1107,28 +1210,30 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
         .attr('stroke', '#555').attr('stroke-width', 1);
 
     // O += P_ij @ V_j label
-    sectionG.append('text').attr('x', midX + Math.max(sW, oW) / 2 + 15).attr('y', pY + sH + 10)
+    sectionG.append('text').attr('x', midX + Math.max(sW, oW) / 2 + totalStackH + 15).attr('y', pY + sH + 10)
         .attr('fill', '#3498db').attr('font-size', '9px')
-        .text('O_i += P_ij \u00d7 V_j');
+        .text(packed ? 'O_i^(h) += P_ij^(h) \u00d7 V_j' : 'O_i += P_ij \u00d7 V_j');
 
     // Write-back arrow
     const wbY = oY + oH + 24;
+    let wbText = params.splitKV ? 'Write partial O_i \u2192 HBM' : 'Write O_i \u2192 HBM (final iter)';
+    if (packed) wbText = params.splitKV ? `Write ${G}\u00d7 partial O_i \u2192 HBM` : `Write ${G}\u00d7 O_i \u2192 HBM (final iter)`;
     sectionG.append('text').attr('x', midX).attr('y', wbY + 4)
         .attr('text-anchor', 'middle').attr('fill', '#3498db').attr('font-size', '9px').attr('font-weight', '600')
-        .text(params.splitKV ? 'Write partial O_i \u2192 HBM' : 'Write O_i \u2192 HBM (final iter)');
+        .text(wbText);
 
     // Online softmax state
-    const stateX = midX + Math.max(sW, oW) / 2 + 20;
+    const stateX = midX + Math.max(sW, oW) / 2 + totalStackH + 20;
     const stateY = oY;
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 10)
         .attr('fill', '#666').attr('font-size', '9px').attr('font-style', 'italic')
         .text('Online softmax state:');
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 22)
         .attr('fill', '#888').attr('font-size', '9px')
-        .text(`m_i [${actBr}] — row max`);
+        .text(packed ? `m_i [${G}\u00d7${actBr}] — row max` : `m_i [${actBr}] — row max`);
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 34)
         .attr('fill', '#888').attr('font-size', '9px')
-        .text(`l_i [${actBr}] — row sum(exp)`);
+        .text(packed ? `l_i [${G}\u00d7${actBr}] — row sum(exp)` : `l_i [${actBr}] — row sum(exp)`);
 
     return y + wbY + 16;
 }
@@ -1136,10 +1241,11 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
 // --- Section C: Memory Hierarchy ---
 
 function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
-                             S_q, S, d_q, d_k, d_v, selQ, selKV) {
+                             S_q, S, d_q, d_k, d_v, selQ, selKV, isGQA, G, n_kv) {
     const Br = params.block_q, Bc = params.block_kv;
     const actBr = Math.min(Br, S_q - selQ * Br);
     const actBc = Math.min(Bc, S - selKV * Bc);
+    const packed = isGQA && params.packGQA;
     const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
 
     sectionG.append('text')
@@ -1151,6 +1257,22 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
     const bandH = 44;
     const bandGap = 28;
     const bandW = width;
+
+    const qSmemLabel = packed ? `Q_i \u00d7${G}` : 'Q_i';
+    const qSmemShape = packed ? `${G}\u00d7${actBr}\u00d7${d_q}` : `${actBr}\u00d7${d_q}`;
+    const qSmemBytes = (packed ? G : 1) * actBr * d_q * 2;
+
+    const sRegLabel = packed ? `S_ij \u00d7${G}` : 'S_ij';
+    const sRegShape = packed ? `${G}\u00d7${actBr}\u00d7${actBc}` : `${actBr}\u00d7${actBc}`;
+    const sRegBytes = (packed ? G : 1) * actBr * actBc * 2;
+
+    const oRegLabel = packed ? `O_i \u00d7${G}` : 'O_i';
+    const oRegShape = packed ? `${G}\u00d7${actBr}\u00d7${d_v}` : `${actBr}\u00d7${d_v}`;
+    const oRegBytes = (packed ? G : 1) * actBr * d_v * 2;
+
+    const mlRegLabel = packed ? `m_i, l_i \u00d7${G}` : 'm_i, l_i';
+    const mlRegShape = packed ? `2\u00d7${G}\u00d7${actBr}` : `2\u00d7${actBr}`;
+    const mlRegBytes = (packed ? G : 1) * actBr * 2 * 2;
 
     const tiers = [
         {
@@ -1165,13 +1287,13 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
             ]
         },
         {
-            label: 'SMEM (Shared Memory)',
+            label: packed ? `SMEM (Shared Memory) — ${G} heads packed` : 'SMEM (Shared Memory)',
             color: '#1a3a2a',
-            border: '#2a5a3a',
+            border: packed ? '#5a8a3a' : '#2a5a3a',
             items: [
-                { label: 'Q_i', shape: `${actBr}\u00d7${d_q}`, bytes: actBr * d_q * 2, color: '#e74c3c', note: 'persistent' },
-                { label: 'K_j', shape: `${actBc}\u00d7${d_k}`, bytes: actBc * d_k * 2, color: '#2ecc71', note: 'rotated' },
-                ...(V.id !== K.id ? [{ label: 'V_j', shape: `${actBc}\u00d7${d_v}`, bytes: actBc * d_v * 2, color: '#f39c12', note: 'rotated' }] : []),
+                { label: qSmemLabel, shape: qSmemShape, bytes: qSmemBytes, color: '#e74c3c', note: 'persistent' },
+                { label: 'K_j', shape: `${actBc}\u00d7${d_k}`, bytes: actBc * d_k * 2, color: '#2ecc71', note: packed ? `shared \u00d7${G}` : 'rotated' },
+                ...(V.id !== K.id ? [{ label: 'V_j', shape: `${actBc}\u00d7${d_v}`, bytes: actBc * d_v * 2, color: '#f39c12', note: packed ? `shared \u00d7${G}` : 'rotated' }] : []),
             ]
         },
         {
@@ -1179,15 +1301,17 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
             color: '#2a1a3a',
             border: '#4a2a5a',
             items: [
-                { label: 'S_ij', shape: `${actBr}\u00d7${actBc}`, bytes: actBr * actBc * 2, color: '#9b59b6' },
-                { label: 'O_i', shape: `${actBr}\u00d7${d_v}`, bytes: actBr * d_v * 2, color: '#3498db', note: 'accum' },
-                { label: 'm_i, l_i', shape: `2\u00d7${actBr}`, bytes: actBr * 2 * 2, color: '#888' },
+                { label: sRegLabel, shape: sRegShape, bytes: sRegBytes, color: '#9b59b6' },
+                { label: oRegLabel, shape: oRegShape, bytes: oRegBytes, color: '#3498db', note: 'accum' },
+                { label: mlRegLabel, shape: mlRegShape, bytes: mlRegBytes, color: '#888' },
             ]
         },
     ];
 
     const arrowLabels = [
-        'load Q_i once; stream K_j, V_j each iter; write O_i once',
+        packed
+            ? `load ${G}\u00d7 Q_i once; stream K_j, V_j once (shared); write ${G}\u00d7 O_i`
+            : 'load Q_i once; stream K_j, V_j each iter; write O_i once',
         'compute tiles in registers',
     ];
 

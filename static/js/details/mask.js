@@ -1,5 +1,6 @@
 // mask.js — Standard mask, mask tensor, and paged mask tensor detail visualizations
 import { detailMetrics, maskLayout } from './shared.js';
+import { drawSoftmaxSection } from './softmax.js';
 
 // Deterministic pseudo-random score for cell (i, j) — looks natural, stable across rerenders
 function pseudoScore(i, j) {
@@ -170,7 +171,10 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
             .attr('text-anchor', 'middle').attr('fill', '#555')
             .attr('font-size', '9px').text('Schematic \u2014 reduce S to see individual cells');
 
-        svg.attr('height', y2 + gridH + 64);
+        // --- Part 3: Softmax bar chart ---
+        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 62, S, cellSize, attnWeights);
+
+        svg.attr('height', softmaxBottom + 10);
         return;
     }
 
@@ -334,7 +338,10 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
         .attr('x', gradW).attr('y', gradY + 22)
         .attr('text-anchor', 'end').attr('font-size', '8px').attr('fill', '#888').text('max');
 
-    svg.attr('height', gradY + 40);
+    // --- Part 3: Softmax bar chart ---
+    const softmaxBottom = drawSoftmaxSection(g, 0, gradY + 52, S, cellSize, attnWeights);
+
+    svg.attr('height', softmaxBottom + 10);
 }
 
 // --- Mask tensor detail (when clicking the mask tensor directly) ---
@@ -444,84 +451,247 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
 
     const g = svg.append('g').attr('transform', `translate(${pad}, 38)`);
 
-    g.append('text').attr('class', 'tensor-label')
-        .attr('x', gridW / 2).attr('y', -14)
-        .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+    // Pre-compute block-diagonal scores and softmax weights for the full grid
+    const d_h = params.d_h || 64;
+    const scaleVal = 1 / Math.sqrt(d_h);
+    // Build cumulative offsets
+    const cumSq = [0], cumS = [0];
+    for (let r = 0; r < sqLens.length; r++) {
+        cumSq.push(cumSq[r] + sqLens[r]);
+        cumS.push(cumS[r] + sLens[r]);
+    }
+    // Full block-diagonal raw scores and attention weights
+    const rawScoreGrid = [];
+    const attnWeights = [];
+    for (let i = 0; i < dispRows; i++) {
+        const rawRow = new Array(dispCols).fill(0);
+        const maskedRow = new Array(dispCols).fill(-Infinity);
+        // Find which request this query row belongs to
+        let reqIdx = 0;
+        while (reqIdx < sqLens.length - 1 && i >= cumSq[reqIdx + 1]) reqIdx++;
+        const localI = i - cumSq[reqIdx];
+        const colStart = cumS[reqIdx];
+        const ns = sLens[reqIdx], nq = sqLens[reqIdx];
+        const qOff = ns - nq;
+        for (let j = 0; j < ns; j++) {
+            const s = pseudoScore(localI, j) * scaleVal;
+            rawRow[colStart + j] = s;
+            if ((localI + qOff) >= j) maskedRow[colStart + j] = s;
+        }
+        rawScoreGrid.push(rawRow);
+        const exps = maskedRow.map(s => s === -Infinity ? 0 : Math.exp(s));
+        const sumExp = exps.reduce((a, b) => a + b, 0);
+        attnWeights.push(exps.map(e => sumExp > 0 ? e / sumExp : 0));
+    }
 
-    if (schematic) {
+    // Request 0 weights for the softmax bar chart
+    const req0S = sLens[0];
+    const req0Weights = attnWeights.slice(0, sqLens[0]).map(row => row.slice(0, req0S));
+
+    // --- Helper: draw block-diagonal boundary lines ---
+    function drawBoundaryLines(gg, yBase) {
+        for (let r = 1; r < sqLens.length; r++) {
+            const hLineY = yBase + (cumSq[r] / dispRows) * gridH;
+            gg.append('line')
+                .attr('x1', 0).attr('y1', hLineY)
+                .attr('x2', gridW).attr('y2', hLineY)
+                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6)
+                .attr('pointer-events', 'none');
+        }
+        for (let r = 1; r < sLens.length; r++) {
+            const vLineX = (cumS[r] / dispCols) * gridW;
+            gg.append('line')
+                .attr('x1', vLineX).attr('y1', yBase)
+                .attr('x2', vLineX).attr('y2', yBase + gridH)
+                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6)
+                .attr('pointer-events', 'none');
+        }
+    }
+
+    // --- Helper: draw schematic block-diagonal grid with per-request causal regions ---
+    function drawSchematicBlockDiag(gg, yBase, fillColor, labelPrefix) {
         // Background (cross-sequence blocked)
-        g.append('rect').attr('x', 0).attr('y', 10)
+        gg.append('rect').attr('x', 0).attr('y', yBase)
             .attr('width', gridW).attr('height', gridH)
             .attr('fill', '#1a1520').attr('fill-opacity', 0.8).attr('rx', 2);
-
-        // Draw each sequence's causal block on the diagonal
-        let rowOff = 0, colOff = 0;
+        // Per-request blocks
         for (let si = 0; si < sqLens.length; si++) {
             const nq = sqLens[si], ns = sLens[si];
-            const bx = (colOff / dispCols) * gridW;
-            const by = 10 + (rowOff / dispRows) * gridH;
+            const bx = (cumS[si] / dispCols) * gridW;
+            const by = yBase + (cumSq[si] / dispRows) * gridH;
             const bw = (ns / dispCols) * gridW;
             const bh = (nq / dispRows) * gridH;
             const qOff = ns - nq;
             const topX = bx + ((qOff + 1) / ns) * bw;
-
-            g.append('rect').attr('x', bx).attr('y', by)
-                .attr('width', bw).attr('height', bh)
-                .attr('fill', '#2c3e50').attr('fill-opacity', 0.5);
-            g.append('polygon')
-                .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
-                .attr('fill', '#1abc9c').attr('fill-opacity', 0.7);
-            g.append('text').attr('class', 'dim-label')
-                .attr('x', bx + bw / 2).attr('y', by + bh / 2 + 3)
-                .attr('text-anchor', 'middle').attr('font-size', '8px')
-                .attr('fill', '#fff').attr('fill-opacity', 0.8)
-                .text(`S${si}`);
-
-            if (si < sqLens.length - 1) {
-                g.append('line')
-                    .attr('x1', 0).attr('y1', by + bh)
-                    .attr('x2', gridW).attr('y2', by + bh)
-                    .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
+            if (fillColor === 'mask') {
+                gg.append('rect').attr('x', bx).attr('y', by)
+                    .attr('width', bw).attr('height', bh)
+                    .attr('fill', '#2c3e50').attr('fill-opacity', 0.5);
+                gg.append('polygon')
+                    .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
+                    .attr('fill', '#1abc9c').attr('fill-opacity', 0.7);
+            } else if (fillColor === 'heat') {
+                gg.append('polygon')
+                    .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
+                    .attr('fill', '#f39c12').attr('fill-opacity', 0.5);
+            } else {
+                // QK^T scores
+                gg.append('rect').attr('x', bx).attr('y', by)
+                    .attr('width', bw).attr('height', bh)
+                    .attr('fill', '#3498db').attr('fill-opacity', 0.5);
             }
-            rowOff += nq; colOff += ns;
+            if (labelPrefix) {
+                gg.append('text').attr('class', 'dim-label')
+                    .attr('x', bx + bw / 2).attr('y', by + bh / 2 + 3)
+                    .attr('text-anchor', 'middle').attr('font-size', '8px')
+                    .attr('fill', '#fff').attr('fill-opacity', 0.8)
+                    .text(`${labelPrefix}${si}`);
+            }
         }
+        drawBoundaryLines(gg, yBase);
+    }
 
-        // Vertical boundary lines
-        let vOff = 0;
-        for (let sj = 0; sj < sLens.length - 1; sj++) {
-            vOff += sLens[sj];
-            const vx = (vOff / dispCols) * gridW;
-            g.append('line')
-                .attr('x1', vx).attr('y1', 10)
-                .attr('x2', vx).attr('y2', gridH + 10)
-                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
-        }
+    if (schematic) {
+        // --- Part 0: QK^T scores schematic ---
+        g.append('text').attr('class', 'tensor-label')
+            .attr('x', gridW / 2).attr('y', -14)
+            .text(`QK\u1d40 / \u221a${d_h} (${dispRows}\u00d7${dispCols}, B=${params.B})`);
+        drawSchematicBlockDiag(g, 10, 'scores', 'S');
+        drawPillLabel(g, gridW / 2, 10 + gridH / 2, 'q\u1d62\u00b7k\u2c7c / \u221ad\u2095', '#fff');
 
-        const descY = gridH + 30;
-        g.append('rect').attr('x', 0).attr('y', descY).attr('width', 12).attr('height', 12)
+        let curY = gridH + 46;
+
+        // --- Part 1: Causal mask schematic ---
+        g.append('text').attr('class', 'tensor-label')
+            .attr('x', gridW / 2).attr('y', curY - 14)
+            .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+        drawSchematicBlockDiag(g, curY, 'mask', 'S');
+
+        const legendY = curY + gridH + 26;
+        g.append('rect').attr('x', 0).attr('y', legendY).attr('width', 12).attr('height', 12)
             .attr('fill', '#1abc9c').attr('fill-opacity', 0.85).attr('rx', 2);
-        g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 10)
+        g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', legendY + 10)
             .attr('fill', '#aaa').text('Causal attend');
-        g.append('rect').attr('x', 0).attr('y', descY + 18).attr('width', 12).attr('height', 12)
+        g.append('rect').attr('x', 140).attr('y', legendY).attr('width', 12).attr('height', 12)
             .attr('fill', '#1a1520').attr('fill-opacity', 0.8).attr('rx', 2);
-        g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 28)
+        g.append('text').attr('class', 'dim-label').attr('x', 158).attr('y', legendY + 10)
             .attr('fill', '#aaa').text('Cross-sequence (blocked)');
 
+        // --- Part 2: Attention weights schematic ---
+        let y2 = legendY + 46;
+        g.append('text').attr('class', 'tensor-label')
+            .attr('x', gridW / 2).attr('y', y2)
+            .text('Attention Weights (after softmax)');
+        y2 += 16;
+        drawSchematicBlockDiag(g, y2, 'heat', null);
         g.append('text').attr('class', 'dim-label')
-            .attr('x', gridW / 2).attr('y', descY + 48)
+            .attr('x', gridW / 2).attr('y', y2 + gridH + 24)
+            .attr('text-anchor', 'middle').attr('fill', '#f39c12')
+            .attr('font-size', '10px').text('each row sums to 1 (within its request)');
+
+        g.append('text').attr('class', 'dim-label')
+            .attr('x', gridW / 2).attr('y', y2 + gridH + 42)
             .attr('text-anchor', 'middle').attr('fill', '#555')
             .attr('font-size', '9px').text('Schematic \u2014 reduce S to see individual cells');
 
         g.append('text').attr('class', 'dim-label')
-            .attr('x', 0).attr('y', descY + 66)
+            .attr('x', 0).attr('y', y2 + gridH + 60)
             .attr('fill', '#777')
             .text(`Per-request: [${sqLens.map((q, i) => `S_q=${q} \u00d7 S=${sLens[i]}`).join(', ')}]`);
 
-        svg.attr('height', descY + 86);
+        // --- Part 3: Softmax bar chart ---
+        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 80, req0S, cellSize, req0Weights);
+
+        svg.attr('height', softmaxBottom + 10);
         return;
     }
 
-    // Draw block-diagonal mask grid: rows = S_q (query tokens), cols = S (full KV)
+    // === Non-schematic (cell-by-cell) rendering ===
+
+    const showCellText = cellSize >= 16;
+    const showScoreText = cellSize >= 20;
+
+    // --- Helper: draw row/column labels for block-diagonal grid ---
+    function drawBlockLabels(yBase) {
+        let labelOff = 0;
+        for (let si = 0; si < sqLens.length; si++) {
+            const midPos = labelOff + sqLens[si] / 2;
+            g.append('text').attr('class', 'dim-label')
+                .attr('x', -8).attr('y', yBase + midPos * cellSize + 4)
+                .attr('text-anchor', 'end').attr('font-size', '8px').attr('fill', '#aaa')
+                .text(`S_q=${sqLens[si]}`);
+            labelOff += sqLens[si];
+        }
+        let colLabelOff = 0;
+        for (let sj = 0; sj < sLens.length; sj++) {
+            const midPos = colLabelOff + sLens[sj] / 2;
+            g.append('text').attr('class', 'dim-label')
+                .attr('x', midPos * cellSize).attr('y', yBase - 4)
+                .attr('text-anchor', 'middle').attr('font-size', '8px').attr('fill', '#aaa')
+                .text(`S=${sLens[sj]}`);
+            colLabelOff += sLens[sj];
+        }
+    }
+
+    // --- Part 0: QK^T raw scores heatmap ---
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', gridW / 2).attr('y', -14)
+        .text(`QK\u1d40 / \u221a${d_h} (${dispRows}\u00d7${dispCols}, B=${params.B})`);
+
+    const allScores = rawScoreGrid.flat();
+    const maxRaw = Math.max(...allScores);
+    const minRaw = Math.min(...allScores);
+    const absMax = Math.max(Math.abs(maxRaw), Math.abs(minRaw)) || 1;
+
+    for (let i = 0; i < dispRows; i++) {
+        for (let j = 0; j < dispCols; j++) {
+            const s = rawScoreGrid[i][j];
+            // Cross-request cells have score 0 and should look dim
+            const isCross = (() => {
+                let reqI = 0;
+                while (reqI < sqLens.length - 1 && i >= cumSq[reqI + 1]) reqI++;
+                let reqJ = 0;
+                while (reqJ < sLens.length - 1 && j >= cumS[reqJ + 1]) reqJ++;
+                return reqI !== reqJ;
+            })();
+            if (isCross) {
+                g.append('rect')
+                    .attr('x', j * cellSize).attr('y', i * cellSize + 10)
+                    .attr('width', cellSize - 1).attr('height', cellSize - 1)
+                    .attr('rx', 1)
+                    .attr('fill', '#1a1520').attr('fill-opacity', 0.8)
+                    .attr('stroke', '#1a1d2a').attr('stroke-width', 0.3);
+            } else {
+                const norm = s / absMax;
+                const color = s >= 0 ? '#3498db' : '#e74c3c';
+                const opacity = 0.15 + Math.abs(norm) * 0.7;
+                g.append('rect')
+                    .attr('x', j * cellSize).attr('y', i * cellSize + 10)
+                    .attr('width', cellSize - 1).attr('height', cellSize - 1)
+                    .attr('rx', cellSize >= 6 ? 2 : 1)
+                    .attr('fill', color).attr('fill-opacity', opacity)
+                    .attr('stroke', cellSize >= 4 ? '#1a1d2a' : 'none').attr('stroke-width', 0.3);
+                if (showScoreText) {
+                    g.append('text')
+                        .attr('x', j * cellSize + cellSize / 2)
+                        .attr('y', i * cellSize + cellSize / 2 + 13)
+                        .attr('text-anchor', 'middle').attr('font-size', '7px')
+                        .attr('fill', Math.abs(norm) > 0.5 ? '#fff' : '#ccc')
+                        .text(s.toFixed(2));
+                }
+            }
+        }
+    }
+    drawBlockLabels(10);
+    drawBoundaryLines(g, 10);
+
+    const yOff = gridH + 46;
+
+    // --- Part 1: Causal mask ---
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', gridW / 2).attr('y', yOff - 14)
+        .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+
     let rowOff = 0;
     for (let si = 0; si < sqLens.length; si++) {
         const nq = sqLens[si];
@@ -542,82 +712,130 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
                     }
 
                     g.append('rect')
-                        .attr('x', (colOff + j) * cellSize).attr('y', (rowOff + i) * cellSize + 10)
+                        .attr('x', (colOff + j) * cellSize).attr('y', yOff + (rowOff + i) * cellSize + 10)
                         .attr('width', cellSize - 1).attr('height', cellSize - 1)
                         .attr('rx', 1)
                         .attr('fill', fill).attr('fill-opacity', opacity)
                         .attr('stroke', '#1a1d2a').attr('stroke-width', 0.3);
+
+                    if (showCellText) {
+                        const allowed = si === sj && j <= (ns - nq + i);
+                        g.append('text')
+                            .attr('x', (colOff + j) * cellSize + cellSize / 2)
+                            .attr('y', yOff + (rowOff + i) * cellSize + cellSize / 2 + 13)
+                            .attr('text-anchor', 'middle').attr('font-size', '8px')
+                            .attr('fill', si !== sj ? '#444' : (allowed ? '#fff' : '#555'))
+                            .text(si !== sj ? '0' : (allowed ? '1' : '-\u221e'));
+                    }
                 }
             }
             colOff += sLens[sj];
         }
-
-        if (si < sqLens.length - 1) {
-            g.append('line')
-                .attr('x1', 0).attr('y1', (rowOff + nq) * cellSize + 10)
-                .attr('x2', gridW).attr('y2', (rowOff + nq) * cellSize + 10)
-                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
-        }
-
         rowOff += nq;
     }
+    drawBlockLabels(yOff + 10);
+    drawBoundaryLines(g, yOff + 10);
 
-    // Vertical boundary lines between sequences
-    let vOff = 0;
-    for (let sj = 0; sj < sLens.length - 1; sj++) {
-        vOff += sLens[sj];
-        g.append('line')
-            .attr('x1', vOff * cellSize).attr('y1', 10)
-            .attr('x2', vOff * cellSize).attr('y2', gridH + 10)
-            .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
-    }
-
-    // Row labels (S_q side)
-    let labelOff = 0;
-    for (let si = 0; si < sqLens.length; si++) {
-        const nq = sqLens[si];
-        const midPos = labelOff + nq / 2;
-        g.append('text').attr('class', 'dim-label')
-            .attr('x', -8).attr('y', midPos * cellSize + 14)
-            .attr('text-anchor', 'end').attr('font-size', '8px').attr('fill', '#aaa')
-            .text(`S_q=${sqLens[si]}`);
-        labelOff += nq;
-    }
-
-    // Column labels (S side)
-    let colLabelOff = 0;
-    for (let sj = 0; sj < sLens.length; sj++) {
-        const ns = sLens[sj];
-        const midPos = colLabelOff + ns / 2;
-        g.append('text').attr('class', 'dim-label')
-            .attr('x', midPos * cellSize).attr('y', 6)
-            .attr('text-anchor', 'middle').attr('font-size', '8px').attr('fill', '#aaa')
-            .text(`S=${sLens[sj]}`);
-        colLabelOff += ns;
-    }
-
-    const descY = gridH + 30;
-
-    // Legend
-    g.append('rect').attr('x', 0).attr('y', descY).attr('width', 12).attr('height', 12)
+    const maskLegendY = yOff + gridH + 26;
+    g.append('rect').attr('x', 0).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
         .attr('fill', '#1abc9c').attr('fill-opacity', 0.85).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 10)
+    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', maskLegendY + 10)
         .attr('fill', '#aaa').text('Causal attend (same seq, i \u2265 j)');
-
-    g.append('rect').attr('x', 0).attr('y', descY + 18).attr('width', 12).attr('height', 12)
+    g.append('rect').attr('x', 140).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
         .attr('fill', '#2c3e50').attr('fill-opacity', 0.5).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 28)
-        .attr('fill', '#aaa').text('Masked future (same seq, i < j)');
-
-    g.append('rect').attr('x', 0).attr('y', descY + 36).attr('width', 12).attr('height', 12)
+    g.append('text').attr('class', 'dim-label').attr('x', 158).attr('y', maskLegendY + 10)
+        .attr('fill', '#aaa').text('Masked (i < j) \u2192 -\u221e');
+    g.append('rect').attr('x', 320).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
         .attr('fill', '#1a1520').attr('fill-opacity', 0.8).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 46)
-        .attr('fill', '#aaa').text('Cross-sequence (always blocked)');
+    g.append('text').attr('class', 'dim-label').attr('x', 338).attr('y', maskLegendY + 10)
+        .attr('fill', '#aaa').text('Cross-seq');
+
+    // --- Part 2: Attention weights heatmap ---
+    let y2 = maskLegendY + 46;
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', gridW / 2).attr('y', y2)
+        .text('Attention Weights (after softmax)');
+    y2 += 26;
+
+    const maxWeight = Math.max(...attnWeights.flat());
+
+    for (let i = 0; i < dispRows; i++) {
+        for (let j = 0; j < dispCols; j++) {
+            const w = attnWeights[i][j];
+            const isCross = (() => {
+                let reqI = 0;
+                while (reqI < sqLens.length - 1 && i >= cumSq[reqI + 1]) reqI++;
+                let reqJ = 0;
+                while (reqJ < sLens.length - 1 && j >= cumS[reqJ + 1]) reqJ++;
+                return reqI !== reqJ;
+            })();
+            if (isCross) {
+                g.append('rect')
+                    .attr('x', j * cellSize).attr('y', y2 + i * cellSize)
+                    .attr('width', cellSize - 1).attr('height', cellSize - 1)
+                    .attr('rx', 1)
+                    .attr('fill', '#1a1520').attr('fill-opacity', 0.8)
+                    .attr('stroke', '#1a1d2a').attr('stroke-width', 0.3);
+            } else {
+                const intensity = maxWeight > 0 ? w / maxWeight : 0;
+                g.append('rect')
+                    .attr('x', j * cellSize).attr('y', y2 + i * cellSize)
+                    .attr('width', cellSize - 1).attr('height', cellSize - 1)
+                    .attr('rx', cellSize >= 6 ? 2 : 1)
+                    .attr('fill', w > 0 ? '#f39c12' : '#1a1d2a')
+                    .attr('fill-opacity', w > 0 ? 0.15 + intensity * 0.75 : 0.3)
+                    .attr('stroke', cellSize >= 4 ? '#1a1d2a' : 'none').attr('stroke-width', 0.3);
+                if (showCellText && w > 0.01) {
+                    g.append('text')
+                        .attr('x', j * cellSize + cellSize / 2)
+                        .attr('y', y2 + i * cellSize + cellSize / 2 + 3)
+                        .attr('text-anchor', 'middle').attr('font-size', '7px')
+                        .attr('fill', intensity > 0.5 ? '#fff' : '#ccc')
+                        .text(w.toFixed(2));
+                }
+            }
+        }
+    }
+    drawBlockLabels(y2);
+    drawBoundaryLines(g, y2);
 
     g.append('text').attr('class', 'dim-label')
-        .attr('x', 0).attr('y', descY + 66)
+        .attr('x', gridW / 2).attr('y', y2 + gridH + 14)
+        .attr('text-anchor', 'middle').attr('fill', '#f39c12')
+        .attr('font-size', '10px')
+        .text('each row sums to 1 (within its request)');
+
+    const heatBottom = y2 + gridH + 30;
+
+    // Color scale legend
+    const heatLegendY = heatBottom + 4;
+    g.append('text').attr('class', 'dim-label')
+        .attr('x', 0).attr('y', heatLegendY)
+        .attr('fill', '#888').attr('font-size', '9px')
+        .text('Intensity = attention weight:');
+    const gradW = 120;
+    const gradY = heatLegendY + 6;
+    for (let k = 0; k < 20; k++) {
+        g.append('rect')
+            .attr('x', k * (gradW / 20)).attr('y', gradY)
+            .attr('width', gradW / 20).attr('height', 10)
+            .attr('fill', '#f39c12')
+            .attr('fill-opacity', 0.15 + (k / 19) * 0.75);
+    }
+    g.append('text').attr('class', 'dim-label')
+        .attr('x', 0).attr('y', gradY + 22)
+        .attr('font-size', '8px').attr('fill', '#888').text('0');
+    g.append('text').attr('class', 'dim-label')
+        .attr('x', gradW).attr('y', gradY + 22)
+        .attr('text-anchor', 'end').attr('font-size', '8px').attr('fill', '#888').text('max');
+
+    g.append('text').attr('class', 'dim-label')
+        .attr('x', 0).attr('y', gradY + 42)
         .attr('fill', '#777')
         .text(`Per-request: [${sqLens.map((q, i) => `S_q=${q} × S=${sLens[i]}`).join(', ')}]`);
 
-    svg.attr('height', descY + 86);
+    // --- Part 3: Softmax bar chart ---
+    const softmaxBottom = drawSoftmaxSection(g, 0, gradY + 62, req0S, cellSize, req0Weights);
+
+    svg.attr('height', softmaxBottom + 10);
 }

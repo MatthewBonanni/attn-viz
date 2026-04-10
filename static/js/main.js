@@ -75,6 +75,7 @@ params.flashAttn = false;
 params.block_q = 128;
 params.block_kv = 128;
 params.splitKV = false;
+params.packGQA = false;
 params.seqLens = [params.S];     // per-request total S (cached + new)
 params.queryLens = [params.S_q]; // per-request S_q (new query tokens)
 
