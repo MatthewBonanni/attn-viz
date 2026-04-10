@@ -4,11 +4,13 @@ function pseudoScore(i, j) {
     let h = (i * 374761 + j * 668265) ^ 0x5bd1e995;
     h = Math.imul(h ^ (h >>> 13), 0x5bd1e995);
     h = h ^ (h >>> 15);
-    return 0.3 + ((h >>> 0) / 0xffffffff) * 1.4;
+    return -0.8 + ((h >>> 0) / 0xffffffff) * 2.4;  // range [-0.8, 1.6]
 }
 
 export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights) {
-    const exampleRow = Math.min(4, dispS - 1);
+    // Pick an example row that exists in precomputed weights
+    const maxRow = precomputedWeights ? precomputedWeights.length - 1 : dispS - 1;
+    const exampleRow = Math.min(4, maxRow);
 
     g.append('text').attr('class', 'tensor-label')
         .attr('x', x + dispS * cellSize / 2).attr('y', y)
@@ -52,7 +54,7 @@ export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights)
     else labelEvery = 0;
 
     for (let j = 0; j < dispS; j++) {
-        const allowed = j <= exampleRow;
+        const allowed = probs[j] > 0;
         const barH = allowed ? (probs[j] / maxProb) * barMaxH : 0;
 
         g.append('rect')

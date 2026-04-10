@@ -12,6 +12,28 @@ export function detailMetrics() {
     return { w, cx: w / 2, pad: 20 };
 }
 
+// Compute cell size, label density, and whether to use schematic mode for a mask grid.
+// In schematic mode the grid fits the panel but individual cells are replaced by shapes.
+const MAX_DETAIL_CELLS = 10000;
+
+export function maskLayout(svgW, rows, cols) {
+    const maxGridW = svgW - 80;
+    const maxGridH = 300;
+    const rawCellSize = Math.min(28, maxGridW / cols, maxGridH / rows);
+    const schematic = rawCellSize < 2 || rows * cols > MAX_DETAIL_CELLS;
+    // In schematic mode, shrink cells so the grid fits; otherwise floor at 2px
+    const cellSize = schematic ? Math.min(maxGridW / cols, maxGridH / rows) : rawCellSize;
+
+    let labelEvery;
+    if (schematic) labelEvery = 0;
+    else if (cellSize >= 16) labelEvery = 1;
+    else if (cellSize >= 8) labelEvery = Math.ceil(5 / cellSize) * 2;
+    else if (cellSize >= 4) labelEvery = Math.ceil(20 / cellSize);
+    else labelEvery = 0;
+
+    return { cellSize, labelEvery, schematic };
+}
+
 export function drawDetailBlock(g, x, y, w, h, color, label) {
     g.append('rect')
         .attr('x', x).attr('y', y).attr('width', w).attr('height', h)
