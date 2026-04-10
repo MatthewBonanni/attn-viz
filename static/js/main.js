@@ -30,10 +30,10 @@ const SLIDER_DEFS = {
 const RUNTIME_SLIDERS = ['B', 'S'];
 
 const VARIANT_SLIDERS = {
-    mha: ['n_h', 'd_h'],
-    gqa: ['n_h', 'd_h', 'n_kv'],
-    mqa: ['n_h', 'd_h'],
-    mla: ['n_h', 'd_h', 'd_c', 'd_r'],
+    mha: ['n_h', 'd_h', 'tp_size'],
+    gqa: ['n_h', 'd_h', 'n_kv', 'tp_size'],
+    mqa: ['n_h', 'd_h', 'tp_size'],
+    mla: ['n_h', 'd_h', 'd_c', 'd_r', 'tp_size'],
 };
 
 // Model presets
@@ -65,7 +65,6 @@ for (const [k, v] of Object.entries(SLIDER_DEFS)) {
     params[k] = v.default;
 }
 params.pagedAttn = false;
-params.tp = false;
 params.seqLens = [4, 8];     // per-request context lengths (tokens in KV cache)
 params.queryLens = [4, 1];   // per-request new tokens (prefill=many, decode=1)
 
@@ -179,13 +178,6 @@ function setupToggles() {
         update();
     });
 
-    // Tensor Parallelism toggle
-    d3.select('#toggle-tp').on('click', function() {
-        params.tp = !params.tp;
-        d3.select(this).classed('active', params.tp);
-        buildSliders();
-        update();
-    });
 }
 
 // --- Sliders ---
@@ -200,19 +192,24 @@ function buildSlider(container, key) {
         .attr('class', 'dim-input')
         .attr('type', 'number')
         .attr('min', def.min)
-        .attr('max', key === 'n_kv' ? params.n_h : def.max)
+        .attr('max', (key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max)
         .attr('step', def.step)
         .attr('value', params[key]);
 
     const rangeInput = group.append('input')
         .attr('type', 'range')
         .attr('min', def.min)
-        .attr('max', key === 'n_kv' ? params.n_h : def.max)
+        .attr('max', (key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max)
         .attr('step', def.step)
         .attr('value', params[key]);
 
     function onSliderChange(newVal) {
         params[key] = +newVal;
+
+        // Switch preset to "Custom" when a model architecture param changes
+        if (['n_h', 'd_h', 'n_kv', 'd_c', 'd_r'].includes(key)) {
+            d3.select('#preset-select').property('value', '0');
+        }
 
         if (key === 'n_h' && currentVariant === 'gqa') {
             if (params.n_kv > params.n_h) params.n_kv = params.n_h;
@@ -220,7 +217,7 @@ function buildSlider(container, key) {
         if (key === 'n_kv') {
             params.n_kv = Math.min(params.n_kv, params.n_h);
         }
-        if (key === 'n_h' && params.tp) {
+        if (key === 'n_h' && params.tp_size > 1) {
             if (params.tp_size > params.n_h) params.tp_size = params.n_h;
         }
 
@@ -233,34 +230,22 @@ function buildSlider(container, key) {
         updateDerived();
         update();
 
-        // Update n_kv slider max when n_h changes (don't rebuild — that kills the drag)
+        // Update n_kv and tp_size slider max when n_h changes (don't rebuild — that kills the drag)
         if (key === 'n_h') {
             d3.selectAll('#sliders input[type="range"]').each(function() {
-                // Find the n_kv slider by checking its parent label
                 const group = this.parentNode;
                 const label = d3.select(group).select('.dim-name').text();
-                if (label.includes('n_kv')) {
+                if (label.includes('n_kv') || label.includes('TP')) {
                     d3.select(this).attr('max', params.n_h);
                     d3.select(group).select('input[type="number"]').attr('max', params.n_h);
                 }
             });
-            // Also update tp_size slider max if TP is active
-            if (params.tp) {
-                d3.selectAll('#tp-sliders input[type="range"]').each(function() {
-                    const group = this.parentNode;
-                    const label = d3.select(group).select('.dim-name').text();
-                    if (label.includes('tp_size')) {
-                        d3.select(this).attr('max', params.n_h);
-                        d3.select(group).select('input[type="number"]').attr('max', params.n_h);
-                    }
-                });
-            }
         }
     }
 
     rangeInput.on('input', function() { onSliderChange(this.value); });
     numInput.on('change', function() {
-        let v = Math.max(def.min, Math.min(key === 'n_kv' ? params.n_h : def.max, +this.value || def.min));
+        let v = Math.max(def.min, Math.min((key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max, +this.value || def.min));
         this.value = v;
         onSliderChange(v);
     });
@@ -289,15 +274,6 @@ function buildSliders() {
         pagedContainer.append('div').attr('class', 'slider-section-label').text('Paged Attention');
         buildSlider(pagedContainer, 'block_size');
         buildSeqLengthInputs();
-    }
-
-    // TP sliders (separate section)
-    const tpContainer = d3.select('#tp-sliders');
-    tpContainer.selectAll('*').remove();
-    tpContainer.classed('visible', params.tp);
-    if (params.tp) {
-        tpContainer.append('div').attr('class', 'slider-section-label').text('Tensor Parallelism');
-        buildSlider(tpContainer, 'tp_size');
     }
 
     updateDerived();
@@ -401,7 +377,7 @@ function updateDerived() {
         const ratio = (params.n_h / params.n_kv).toFixed(1);
         html += `<div class="derived-dim">Heads per group: <span>${gpc}</span> (${ratio}× reduction)</div>`;
     }
-    if (params.tp && params.tp_size > 1) {
+    if (params.tp_size > 1) {
         const headsPerRank = Math.floor(params.n_h / params.tp_size);
         html += `<div class="derived-dim">Heads per rank: <span>${headsPerRank}</span></div>`;
     }
@@ -422,7 +398,7 @@ function updateDerived() {
 // --- Update ---
 
 function annotateGraph(graph) {
-    if (params.tp && params.tp_size > 1) addTpAnnotations(graph, params);
+    if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
 }
 

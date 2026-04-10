@@ -393,7 +393,7 @@ function drawMatmulDetail(svg, op, tensorMap) {
     // TP all-reduce visualization
     if (op.tpAllReduce && op.tpSize > 1) {
         noteY += 10;
-        noteY = drawAllReduceSection(g, originX - 20, noteY, op.tpSize, C);
+        noteY = drawAllReduceSection(g, originX - 20, noteY, op.tpSize, C, svgW);
     }
 
     svg.attr('height', noteY + 20);
@@ -1256,17 +1256,39 @@ function drawPagedCacheDetail(svg, _tensor, params) {
 
 const TP_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#c0392b'];
 
-function drawAllReduceSection(g, x, y, tpSize, outputTensor) {
-    g.append('text').attr('class', 'tensor-label')
-        .attr('x', x + 130).attr('y', y)
-        .text('All-Reduce (sum across TP ranks)');
-
+function drawAllReduceSection(g, x, y, tpSize, outputTensor, svgW) {
     const rankH = 22;
     const rankW = 80;
     const rankGap = 4;
-    const rankX = x;
-    const startY = y + 14;
     const displayRanks = Math.min(tpSize, 8);
+    const outW = 70;
+    const sumBoxW = 28;
+    const gap1 = 30; // ranks to sum
+    const gap2 = 16; // sum to output
+
+    // Total width of the diagram: ranks + gap + sum + gap + output
+    const totalW = rankW + gap1 + sumBoxW + gap2 + outW;
+    const rankX = svgW ? (svgW - totalW) / 2 : x;
+
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', rankX + totalW / 2).attr('y', y)
+        .text('All-Reduce (sum across TP ranks)');
+
+    const startY = y + 14;
+
+    // Build per-rank shape annotation
+    const shape = outputTensor.shape;
+    const dimNames = outputTensor.dimNames || [];
+    let rankAnnotation = '';
+    if (shape && shape.length >= 2) {
+        const parts = [];
+        for (let di = 0; di < shape.length; di++) {
+            const dn = dimNames[di] || '';
+            const val = (di === shape.length - 1) ? Math.round(shape[di] / tpSize) : shape[di];
+            parts.push(dn ? `${dn}=${val}` : `${val}`);
+        }
+        rankAnnotation = `[${parts.join(', ')}]`;
+    }
 
     for (let r = 0; r < displayRanks; r++) {
         const ry = startY + r * (rankH + rankGap);
@@ -1285,9 +1307,18 @@ function drawAllReduceSection(g, x, y, tpSize, outputTensor) {
             .text(`Rank ${r}`);
     }
 
+    // Per-rank dimension annotation (to the left of rank blocks)
+    if (rankAnnotation) {
+        const midRankY = startY + (displayRanks * (rankH + rankGap) - rankGap) / 2;
+        g.append('text').attr('class', 'dim-label')
+            .attr('x', rankX - 6).attr('y', midRankY + 4)
+            .attr('text-anchor', 'end').attr('font-size', '8px').attr('fill', '#aaa')
+            .text(rankAnnotation);
+    }
+
     // Sum symbol
     const totalH = displayRanks * (rankH + rankGap) - rankGap;
-    const sumX = rankX + rankW + 30;
+    const sumX = rankX + rankW + gap1;
     const sumY = startY + totalH / 2 - 14;
 
     // Lines from ranks to sum
@@ -1301,13 +1332,13 @@ function drawAllReduceSection(g, x, y, tpSize, outputTensor) {
 
     g.append('rect')
         .attr('x', sumX).attr('y', sumY)
-        .attr('width', 28).attr('height', 28)
+        .attr('width', sumBoxW).attr('height', 28)
         .attr('fill', '#1e2030')
         .attr('stroke', '#3498db')
         .attr('stroke-width', 2)
         .attr('rx', 4);
     g.append('text')
-        .attr('x', sumX + 14).attr('y', sumY + 19)
+        .attr('x', sumX + sumBoxW / 2).attr('y', sumY + 19)
         .attr('text-anchor', 'middle')
         .attr('fill', '#3498db')
         .attr('font-size', '16px')
@@ -1315,17 +1346,22 @@ function drawAllReduceSection(g, x, y, tpSize, outputTensor) {
         .text('\u03a3');
 
     // Arrow from sum to output
-    const outX = sumX + 44;
+    const outX = sumX + sumBoxW + gap2;
     g.append('line')
-        .attr('x1', sumX + 30).attr('y1', sumY + 14)
+        .attr('x1', sumX + sumBoxW + 2).attr('y1', sumY + 14)
         .attr('x2', outX - 2).attr('y2', sumY + 14)
         .attr('stroke', '#555').attr('stroke-width', 1.5);
+    // Arrowhead
+    g.append('path')
+        .attr('d', `M${outX - 2},${sumY + 14} l-5,-3.5 l0,7 z`)
+        .attr('fill', '#555');
 
     // Output block
-    const outW = 70;
+    const outBlockY = sumY - 2;
+    const outBlockH = 32;
     g.append('rect')
-        .attr('x', outX).attr('y', sumY - 2)
-        .attr('width', outW).attr('height', 32)
+        .attr('x', outX).attr('y', outBlockY)
+        .attr('width', outW).attr('height', outBlockH)
         .attr('fill', outputTensor.color)
         .attr('fill-opacity', 0.7)
         .attr('rx', 3);
@@ -1336,6 +1372,41 @@ function drawAllReduceSection(g, x, y, tpSize, outputTensor) {
         .attr('font-size', '10px')
         .attr('font-weight', '600')
         .text(outputTensor.label);
+
+    // Dimension annotations on the output block
+    if (shape && shape.length >= 2) {
+        const lastDim = shape[shape.length - 1];
+        const lastDimName = dimNames[dimNames.length - 1] || '';
+        const secDim = shape[shape.length - 2];
+        const secDimName = dimNames.length >= 2 ? dimNames[dimNames.length - 2] : '';
+
+        // Bottom label (columns / last dim)
+        const colLabel = lastDimName ? `${lastDimName}=${lastDim}` : `${lastDim}`;
+        g.append('text').attr('class', 'dim-label')
+            .attr('x', outX + outW / 2).attr('y', outBlockY + outBlockH + 12)
+            .attr('text-anchor', 'middle').attr('font-size', '8px').attr('fill', '#aaa')
+            .text(colLabel);
+
+        // Right label (rows / second-to-last dim) — placed on right to avoid overlap with Σ
+        const rowLabel = secDimName ? `${secDimName}=${secDim}` : `${secDim}`;
+        g.append('text').attr('class', 'dim-label')
+            .attr('x', outX + outW + 6).attr('y', outBlockY + outBlockH / 2 + 3)
+            .attr('font-size', '8px').attr('fill', '#aaa')
+            .text(rowLabel);
+
+        // Batch dims (if 3D or 4D)
+        if (shape.length >= 3) {
+            const batchParts = [];
+            for (let di = 0; di < shape.length - 2; di++) {
+                const dn = dimNames[di] || '';
+                batchParts.push(dn ? `${dn}=${shape[di]}` : `${shape[di]}`);
+            }
+            g.append('text').attr('class', 'dim-label')
+                .attr('x', outX + outW / 2).attr('y', outBlockY - 6)
+                .attr('text-anchor', 'middle').attr('font-size', '8px').attr('fill', '#aaa')
+                .text(`[${batchParts.join(', ')}]`);
+        }
+    }
 
     return startY + totalH + 20;
 }

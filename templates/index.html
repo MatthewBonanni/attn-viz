@@ -101,8 +101,8 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 .derived-dim span { color: #7c8cf8; font-weight: 600; }
 
 /* Grouped slider sections */
-#paged-sliders, #tp-sliders { display: none; }
-#paged-sliders.visible, #tp-sliders.visible { display: block; }
+#paged-sliders { display: none; }
+#paged-sliders.visible { display: block; }
 .slider-section-label {
     font-size: 10px; font-weight: 500; color: #666; text-transform: uppercase;
     letter-spacing: 0.8px; margin-top: 10px; margin-bottom: 4px;
@@ -215,10 +215,6 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
             <label>Paged Attention</label>
             <div class="toggle-switch" id="toggle-paged"></div>
         </div>
-        <div class="toggle-row">
-            <label>Tensor Parallelism</label>
-            <div class="toggle-switch" id="toggle-tp"></div>
-        </div>
     </div>
 
     <h2>Runtime</h2>
@@ -229,7 +225,6 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
     <div id="derived"></div>
     <div id="paged-sliders"></div>
     <div id="seq-lengths"></div>
-    <div id="tp-sliders"></div>
 
     <div id="legend">
         <h2>Legend</h2>
