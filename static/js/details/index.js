@@ -7,6 +7,7 @@ import { drawGenericDetail } from './generic.js';
 import { drawPagedCacheDetail } from './cache.js';
 import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
+import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
 
 // Track currently displayed detail for live refresh
 let _currentDetail = null;  // { type: 'op'|'tensor'|'group', id, graphId }
@@ -16,18 +17,60 @@ export function showDetail(op, graph, params) {
     _renderOpDetail(op, graph, params);
 }
 
+function _shiftStatsOverlay(visible) {
+    d3.select('#stats-overlay').style('right', visible ? '536px' : '16px');
+}
+
 function _renderOpDetail(op, graph, params) {
     const panel = d3.select('#detail-panel');
     panel.classed('visible', true);
+    _shiftStatsOverlay(true);
     d3.select('#detail-title').text(op.label);
-    d3.select('#detail-desc').html(op.desc || '');
+
+    const tensorMap = {};
+    for (const t of graph.tensors) tensorMap[t.id] = t;
+
+    // Build description + cost HTML
+    let descHtml = op.desc || '';
+    const cost = computeOpCost(op, tensorMap);
+    if (cost && (cost.flops > 0 || cost.readBytes > 0)) {
+        const threshold = computeRooflineThreshold('H100 SXM');
+        const totalBytes = cost.readBytes + cost.writeBytes;
+        const ai = cost.arithmeticIntensity;
+        const regime = cost.flops === 0 ? 'MEMORY-ONLY'
+            : ai >= threshold ? 'COMPUTE-BOUND' : 'MEMORY-BOUND';
+        const regimeColor = regime === 'COMPUTE-BOUND' ? '#2ecc71'
+            : regime === 'MEMORY-BOUND' ? '#e74c3c' : '#888';
+
+        descHtml += `<div style="margin-top:12px;padding:10px 12px;background:#1a1d2a;border-radius:6px;border:1px solid #2a2d3a;font-size:11px;line-height:1.8">`;
+        descHtml += `<div style="font-weight:600;color:#bbb;margin-bottom:4px;font-size:12px">Cost Analysis</div>`;
+
+        if (cost.flops > 0) {
+            descHtml += `<div><span style="color:#888">FLOPs:</span> <span style="color:#7c8cf8;font-weight:600">${fmtNum(cost.flops)}</span></div>`;
+        }
+
+        // Memory breakdown
+        for (const item of cost.breakdown) {
+            if (item.bytes > 0) {
+                const shapeStr = item.shape ? ` [${item.shape.join('×')}]` : '';
+                descHtml += `<div><span style="color:#888">${item.label}:</span> <span style="color:#aaa">${fmtBytes(item.bytes)}</span><span style="color:#555;font-size:10px">${shapeStr} × 2B</span></div>`;
+            }
+        }
+
+        descHtml += `<div style="margin-top:4px;border-top:1px solid #2a2d3a;padding-top:4px">`;
+        descHtml += `<span style="color:#888">Total memory:</span> <span style="color:#aaa">${fmtBytes(totalBytes)}</span>`;
+        if (cost.flops > 0) {
+            descHtml += ` &nbsp;|&nbsp; <span style="color:#888">Arithmetic intensity:</span> <span style="color:#7c8cf8;font-weight:600">${ai.toFixed(1)}</span> <span style="color:#555">FLOPs/byte</span>`;
+        }
+        descHtml += `</div>`;
+        descHtml += `<div style="margin-top:2px"><span style="color:${regimeColor};font-weight:600">${regime}</span> <span style="color:#555;font-size:10px">(threshold: ${threshold.toFixed(0)} FLOPs/byte on H100)</span></div>`;
+        descHtml += `</div>`;
+    }
+    d3.select('#detail-desc').html(descHtml);
 
     const svg = d3.select('#detail-svg');
     svg.selectAll('*').remove();
     svg.attr('height', 350);
-
-    const tensorMap = {};
-    for (const t of graph.tensors) tensorMap[t.id] = t;
 
     switch (op.type) {
         case 'matmul':
@@ -61,8 +104,20 @@ export function showTensorDetail(tensor, params) {
 function _renderTensorDetail(tensor, params) {
     const panel = d3.select('#detail-panel');
     panel.classed('visible', true);
+    _shiftStatsOverlay(true);
     d3.select('#detail-title').text(tensor.label);
-    d3.select('#detail-desc').html(tensor.desc || '');
+
+    let descHtml = tensor.desc || '';
+    const elems = tensorElements(tensor.shape);
+    const bytes = tensorBytes(tensor.shape);
+    const shapeStr = tensor.shape.join(' × ');
+    descHtml += `<div style="margin-top:12px;padding:10px 12px;background:#1a1d2a;border-radius:6px;border:1px solid #2a2d3a;font-size:11px;line-height:1.8">`;
+    descHtml += `<div style="font-weight:600;color:#bbb;margin-bottom:4px;font-size:12px">Size</div>`;
+    descHtml += `<div><span style="color:#888">Shape:</span> <span style="color:#7c8cf8">[${shapeStr}]</span></div>`;
+    descHtml += `<div><span style="color:#888">Elements:</span> <span style="color:#aaa">${elems.toLocaleString()}</span> <span style="color:#555;font-size:10px">(${fmtNum(elems)})</span></div>`;
+    descHtml += `<div><span style="color:#888">Size (bf16):</span> <span style="color:#aaa">${fmtBytes(bytes)}</span></div>`;
+    descHtml += `</div>`;
+    d3.select('#detail-desc').html(descHtml);
 
     const svg = d3.select('#detail-svg');
     svg.selectAll('*').remove();
@@ -89,6 +144,7 @@ export function showGroupDetail(group) {
 function _renderGroupDetail(group) {
     const panel = d3.select('#detail-panel');
     panel.classed('visible', true);
+    _shiftStatsOverlay(true);
     d3.select('#detail-title').text(group.label);
     d3.select('#detail-desc').html(group.desc || '');
 
@@ -129,4 +185,5 @@ export function refreshDetail(graphs, params) {
 export function hideDetail() {
     _currentDetail = null;
     d3.select('#detail-panel').classed('visible', false);
+    _shiftStatsOverlay(false);
 }

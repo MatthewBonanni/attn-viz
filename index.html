@@ -157,6 +157,19 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 #detail-body .tensor-label { font-size: 13px !important; }
 #detail-desc { font-size: 12px; color: #aaa; line-height: 1.6; margin-top: 16px; }
 
+/* Stats overlay */
+#stats-overlay {
+    position: fixed; bottom: 16px; right: 16px;
+    background: #161822; border: 1px solid #2a2d3a;
+    border-radius: 8px; padding: 12px 16px;
+    font-size: 12px; font-family: 'Inter', system-ui, sans-serif;
+    z-index: 200; min-width: 200px; transition: right 0.25s ease;
+    pointer-events: auto;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    line-height: 1.6;
+}
+#stats-overlay:empty { display: none; }
+
 /* Tooltip */
 #tooltip {
     position: fixed; background: #1e2030; border: 1px solid #3b5bdb;
@@ -301,6 +314,8 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
     <div class="tt-dims"></div>
     <div class="tt-desc"></div>
 </div>
+
+<div id="stats-overlay"></div>
 
 <script src="https://d3js.org/d3.v7.min.js"></script>
 <script type="module" src="static/js/main.js"></script>

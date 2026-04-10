@@ -3,6 +3,7 @@
 import { renderGraph, computeSharedStagePositions } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
+import { computePipelineTotals, fmtNum, fmtBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph,
@@ -472,6 +473,99 @@ function updateDerived() {
     d3.select('#derived').html(html);
 }
 
+// --- Pipeline stats overlay ---
+
+function fmtTime(seconds) {
+    if (seconds < 1e-6) return (seconds * 1e9).toFixed(1) + ' ns';
+    if (seconds < 1e-3) return (seconds * 1e6).toFixed(1) + ' \u00b5s';
+    if (seconds < 1) return (seconds * 1e3).toFixed(2) + ' ms';
+    return seconds.toFixed(3) + ' s';
+}
+
+function updateStatsOverlay(graphs, labels) {
+    const container = d3.select('#stats-overlay');
+    container.html('');
+
+    const gpuKeys = Object.keys(GPU_SPECS);
+
+    graphs.forEach((graph, i) => {
+        const totals = computePipelineTotals(graph);
+
+        if (labels && labels[i]) {
+            container.append('div')
+                .style('font-weight', '600')
+                .style('color', '#bbb')
+                .style('margin-bottom', '6px')
+                .style('font-size', '11px')
+                .text(labels[i]);
+        }
+
+        // Totals row
+        const totalsRow = container.append('div')
+            .style('display', 'flex')
+            .style('gap', '12px')
+            .style('align-items', 'center')
+            .style('flex-wrap', 'wrap')
+            .style('margin-bottom', '8px');
+
+        if (totals.totalFlops > 0) {
+            totalsRow.append('span').html(
+                `<span style="color:#888">FLOPs:</span> <span style="color:#7c8cf8;font-weight:600">${fmtNum(totals.totalFlops)}</span>`
+            );
+        }
+        totalsRow.append('span').html(
+            `<span style="color:#888">Read:</span> <span style="color:#aaa">${fmtBytes(totals.totalReadBytes)}</span>`
+        );
+        totalsRow.append('span').html(
+            `<span style="color:#888">Write:</span> <span style="color:#aaa">${fmtBytes(totals.totalWriteBytes)}</span>`
+        );
+
+        // GPU table
+        const table = container.append('table')
+            .style('width', '100%')
+            .style('border-collapse', 'collapse')
+            .style('font-size', '11px');
+
+        // Header
+        const thead = table.append('tr');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px 2px 0').text('GPU');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Compute');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bandwidth');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bottleneck');
+        thead.append('td').style('color', '#666').style('padding', '2px 0 2px 6px').style('text-align', 'right').text('Time');
+
+        for (const key of gpuKeys) {
+            const gpu = GPU_SPECS[key];
+            const threshold = computeRooflineThreshold(key);
+            const computeTime = totals.totalFlops > 0 ? totals.totalFlops / (gpu.peakTFLOPS_bf16 * 1e12) : 0;
+            const memTime = totals.totalBytes / (gpu.bandwidthTBs * 1e12);
+            const bottleneck = totals.totalFlops === 0 ? 'MEM'
+                : computeTime >= memTime ? 'COMPUTE' : 'MEM';
+            const bottleneckTime = Math.max(computeTime, memTime);
+            const bnColor = bottleneck === 'COMPUTE' ? '#2ecc71' : '#e74c3c';
+
+            const row = table.append('tr');
+            row.append('td').style('color', '#bbb').style('padding', '2px 6px 2px 0').style('font-weight', '500').text(key);
+            row.append('td').style('color', '#aaa').style('padding', '2px 6px').style('text-align', 'right')
+                .text(computeTime > 0 ? fmtTime(computeTime) : '\u2014');
+            row.append('td').style('color', '#aaa').style('padding', '2px 6px').style('text-align', 'right')
+                .text(fmtTime(memTime));
+            row.append('td').style('padding', '2px 6px').style('text-align', 'right')
+                .style('color', bnColor).style('font-weight', '600')
+                .text(bottleneck);
+            row.append('td').style('color', '#7c8cf8').style('padding', '2px 0 2px 6px').style('text-align', 'right')
+                .style('font-weight', '600')
+                .text(fmtTime(bottleneckTime));
+        }
+
+        if (i < graphs.length - 1) {
+            container.append('div')
+                .style('border-top', '1px solid #2a2d3a')
+                .style('margin', '8px 0');
+        }
+    });
+}
+
 // --- Update ---
 
 function annotateGraph(graph) {
@@ -498,6 +592,8 @@ function update() {
         undefined, undefined,
         (group) => showGroupDetail(group)
     );
+
+    updateStatsOverlay([graph]);
 
     refreshDetail([graph], params);
 }
@@ -535,7 +631,8 @@ function renderMlaStacked() {
         .attr('font-size', '13px')
         .attr('font-weight', '600')
         .attr('font-family', 'Inter, system-ui, sans-serif')
-        .text('Prefill Path (Up-projected) \u2014 compute-bound');
+        .text('MHA-style (up-proj) — Prefill Path');
+
 
     // Render decode path below
     const gap = 80;
@@ -562,7 +659,9 @@ function renderMlaStacked() {
         .attr('font-size', '13px')
         .attr('font-weight', '600')
         .attr('font-family', 'Inter, system-ui, sans-serif')
-        .text('Decode Path (Absorbed) \u2014 memory-bandwidth-bound');
+        .text('MQA-style (absorbed) — Decode Path');
+
+    updateStatsOverlay([upprojGraph, absorbedGraph], ['MHA-style (up-proj) — Prefill', 'MQA-style (absorbed) — Decode']);
 
     refreshDetail([upprojGraph, absorbedGraph], params);
 }
