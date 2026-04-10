@@ -17,7 +17,8 @@ const VARIANTS = [
 
 const SLIDER_DEFS = {
     B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 2 },
-    S:      { label: 'S (seq length)',    min: 1, max: 2048, step: 1,  default: 8 },
+    S:      { label: 'S (seq length)',     min: 1, max: 128,  step: 1,  default: 8 },
+    S_q:    { label: 'S_q (query len)',   min: 1, max: 128,  step: 1,  default: 8 },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
     d_h:    { label: 'd_h (head dim)',    min: 1, max: 256,  step: 1,  default: 64 },
     n_kv:   { label: 'n_kv (KV heads)',   min: 1, max: 128,  step: 1,  default: 2 },
@@ -27,7 +28,7 @@ const SLIDER_DEFS = {
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
 };
 
-const RUNTIME_SLIDERS = ['B', 'S'];
+const RUNTIME_SLIDERS = ['B', 'S', 'S_q'];
 
 const VARIANT_SLIDERS = {
     mha: ['n_h', 'd_h', 'tp_size'],
@@ -39,15 +40,15 @@ const VARIANT_SLIDERS = {
 // Model presets
 const PRESETS = [
     { name: 'Custom', variant: null },
-    { name: 'GPT-2 (124M)', variant: 'mha', B: 1, S: 12, n_h: 12, d_h: 64 },
-    { name: 'GPT-2 XL (1.5B)', variant: 'mha', B: 1, S: 12, n_h: 25, d_h: 64 },
-    { name: 'Llama 3.1 8B', variant: 'gqa', B: 1, S: 12, n_h: 32, d_h: 128, n_kv: 8 },
-    { name: 'Llama 3.1 70B', variant: 'gqa', B: 1, S: 12, n_h: 64, d_h: 128, n_kv: 8 },
-    { name: 'Llama 3.1 405B', variant: 'gqa', B: 1, S: 12, n_h: 128, d_h: 128, n_kv: 8 },
-    { name: 'Mistral 7B', variant: 'gqa', B: 1, S: 12, n_h: 32, d_h: 128, n_kv: 8 },
-    { name: 'Qwen 2.5 72B', variant: 'gqa', B: 1, S: 12, n_h: 64, d_h: 128, n_kv: 8 },
-    { name: 'StarCoder (15B)', variant: 'mqa', B: 1, S: 12, n_h: 48, d_h: 128 },
-    { name: 'DeepSeek R1', variant: 'mla', B: 1, S: 12, n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
+    { name: 'GPT-2 (124M)', variant: 'mha', B: 1, S: 12, S_q: 12, n_h: 12, d_h: 64 },
+    { name: 'GPT-2 XL (1.5B)', variant: 'mha', B: 1, S: 12, S_q: 12, n_h: 25, d_h: 64 },
+    { name: 'Llama 3.1 8B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 32, d_h: 128, n_kv: 8 },
+    { name: 'Llama 3.1 70B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 64, d_h: 128, n_kv: 8 },
+    { name: 'Llama 3.1 405B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 128, d_h: 128, n_kv: 8 },
+    { name: 'Mistral 7B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 32, d_h: 128, n_kv: 8 },
+    { name: 'Qwen 2.5 72B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 64, d_h: 128, n_kv: 8 },
+    { name: 'StarCoder (15B)', variant: 'mqa', B: 1, S: 12, S_q: 12, n_h: 48, d_h: 128 },
+    { name: 'DeepSeek R1', variant: 'mla', B: 1, S: 12, S_q: 12, n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
 ];
 
 // Default preset index per variant
@@ -65,8 +66,8 @@ for (const [k, v] of Object.entries(SLIDER_DEFS)) {
     params[k] = v.default;
 }
 params.pagedAttn = false;
-params.seqLens = [4, 8];     // per-request context lengths (tokens in KV cache)
-params.queryLens = [4, 1];   // per-request new tokens (prefill=many, decode=1)
+params.seqLens = [8, 9];     // per-request total S (cached + new)
+params.queryLens = [4, 1];   // per-request S_q (new query tokens)
 
 let currentVariant = 'mha';
 
@@ -116,7 +117,7 @@ function buildVariantTabs() {
                 const presetIdx = VARIANT_DEFAULT_PRESETS[v.id] || 0;
                 const preset = PRESETS[presetIdx];
                 if (preset && preset.variant) {
-                    for (const key of ['B', 'S', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+                    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
                         if (preset[key] != null) params[key] = preset[key];
                     }
                 }
@@ -153,7 +154,7 @@ function buildPresets() {
         if (!preset || !preset.variant) return;
 
         currentVariant = preset.variant;
-        for (const key of ['B', 'S', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
             if (preset[key] != null) params[key] = preset[key];
         }
 
@@ -188,27 +189,29 @@ function buildSlider(container, key) {
     const header = group.append('div').attr('class', 'slider-header');
     header.append('span').attr('class', 'dim-name').text(def.label);
 
+    const isLog2 = key === 'B' || key === 'tp_size';
+    const effectiveMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+
     const numInput = header.append('input')
         .attr('class', 'dim-input')
         .attr('type', 'number')
         .attr('min', def.min)
-        .attr('max', key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max)
+        .attr('max', effectiveMax)
         .attr('step', def.step)
         .attr('value', params[key]);
 
     const rangeInput = group.append('input')
         .attr('type', 'range')
-        .attr('min', def.min)
-        .attr('max', key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max)
-        .attr('step', def.step)
-        .attr('value', params[key]);
+        .attr('min', isLog2 ? Math.log2(Math.max(1, def.min)) : def.min)
+        .attr('max', isLog2 ? Math.log2(effectiveMax) : effectiveMax)
+        .attr('step', isLog2 ? 1 : def.step)
+        .attr('value', isLog2 ? Math.log2(params[key]) : params[key]);
 
     function onSliderChange(newVal) {
         let v = +newVal;
-        // Snap B and tp_size to nearest power of 2
-        if (key === 'B' || key === 'tp_size') {
-            v = Math.pow(2, Math.round(Math.log2(Math.max(1, v))));
-            v = Math.max(def.min, Math.min(key === 'tp_size' ? Math.min(8, params.n_h) : def.max, v));
+        if (isLog2) {
+            const curMax = key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+            v = Math.max(def.min, Math.min(curMax, v));
         }
         params[key] = v;
 
@@ -226,9 +229,15 @@ function buildSlider(container, key) {
         if (key === 'n_h' && params.tp_size > 1) {
             if (params.tp_size > Math.min(8, params.n_h)) params.tp_size = Math.min(8, params.n_h);
         }
+        if (key === 'S_q' && params.S_q > params.S) {
+            params.S = params.S_q;
+        }
+        if (key === 'S' && params.S_q > params.S) {
+            params.S_q = params.S;
+        }
 
         numInput.property('value', params[key]);
-        rangeInput.property('value', params[key]);
+        rangeInput.property('value', isLog2 ? Math.log2(params[key]) : params[key]);
 
         // Extend seqLens/queryLens arrays BEFORE update() so addPagedAnnotations sees the right length
         if ((key === 'B' || key === 'S') && params.pagedAttn) buildSeqLengthInputs();
@@ -236,7 +245,7 @@ function buildSlider(container, key) {
         updateDerived();
         update();
 
-        // Update n_kv and tp_size slider max when n_h changes (don't rebuild — that kills the drag)
+        // Update dependent slider maxes when their constraint changes (don't rebuild — that kills the drag)
         if (key === 'n_h') {
             d3.selectAll('#sliders input[type="range"]').each(function() {
                 const group = this.parentNode;
@@ -251,16 +260,38 @@ function buildSlider(container, key) {
                 }
             });
         }
+        // Keep S and S_q sliders visually in sync when one bumps the other
+        if (key === 'S' || key === 'S_q') {
+            d3.selectAll('#runtime-sliders input[type="range"]').each(function() {
+                const group = this.parentNode;
+                const label = d3.select(group).select('.dim-name').text();
+                if (key === 'S' && label.includes('S_q')) {
+                    d3.select(this).property('value', params.S_q);
+                    d3.select(group).select('input[type="number"]').property('value', params.S_q);
+                } else if (key === 'S_q' && label.includes('S (')) {
+                    d3.select(this).property('value', params.S);
+                    d3.select(group).select('input[type="number"]').property('value', params.S);
+                }
+            });
+        }
     }
 
-    rangeInput.on('input', function() { onSliderChange(this.value); });
+    rangeInput.on('input', function() {
+        const raw = +this.value;
+        onSliderChange(isLog2 ? Math.pow(2, raw) : raw);
+    });
     numInput.on('change', function() {
-        let v = Math.max(def.min, Math.min(key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max, +this.value || def.min));
-        // Snap to power of 2 for B and tp_size
-        if (key === 'B' || key === 'tp_size') {
-            v = Math.pow(2, Math.round(Math.log2(Math.max(1, v))));
-            v = Math.max(def.min, Math.min(key === 'tp_size' ? Math.min(8, params.n_h) : def.max, v));
+        const effMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+        let v = +this.value || def.min;
+        if (isLog2) {
+            const prev = params[key];
+            if (v > prev) {
+                v = Math.pow(2, Math.floor(Math.log2(prev)) + 1);
+            } else if (v < prev) {
+                v = Math.pow(2, Math.ceil(Math.log2(prev)) - 1);
+            }
         }
+        v = Math.max(def.min, Math.min(effMax, v));
         this.value = v;
         onSliderChange(v);
     });
@@ -300,79 +331,112 @@ function buildSeqLengthInputs() {
     container.classed('visible', true);
 
     container.append('div').style('font-size', '10px').style('color', '#666')
-        .style('margin-bottom', '4px').text('Per-request lengths (cached context + new tokens):');
+        .style('margin-bottom', '4px').text('Per-request sequence lengths:');
 
     // Ensure arrays match B
     while (params.seqLens.length < params.B) params.seqLens.push(params.S);
     while (params.seqLens.length > params.B) params.seqLens.pop();
-    while (params.queryLens.length < params.B) params.queryLens.push(1);
+    while (params.queryLens.length < params.B) params.queryLens.push(params.S_q || 1);
     while (params.queryLens.length > params.B) params.queryLens.pop();
+    // Enforce S_q <= S for all entries
+    for (let i = 0; i < params.B; i++) {
+        if (params.queryLens[i] > params.seqLens[i]) {
+            params.seqLens[i] = params.queryLens[i];
+        }
+    }
 
     // Header row
     const header = container.append('div').attr('class', 'seq-row')
         .style('color', '#666').style('font-size', '9px');
     header.append('span').style('width', '42px').text('');
-    header.append('span').style('width', '50px').style('text-align', 'center').text('Cached');
-    header.append('span').style('width', '50px').style('text-align', 'center').text('New');
+    header.append('span').style('width', '50px').style('text-align', 'center').text('S');
+    header.append('span').style('width', '50px').style('text-align', 'center').text('S_q');
     header.append('span').style('font-style', 'italic').text('Type');
 
     for (let i = 0; i < params.B; i++) {
         const row = container.append('div').attr('class', 'seq-row');
         row.append('span').style('width', '42px').text(`Req ${i}:`);
 
-        // Context length (cached KV tokens)
-        const ctxInp = row.append('input')
+        // S (total KV length per request)
+        const sInp = row.append('input')
             .attr('type', 'number')
-            .attr('min', 0)
+            .attr('min', 1)
             .attr('step', 1)
             .property('value', params.seqLens[i]);
 
-        ctxInp.on('input', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) return;
-            v = Math.max(0, v);
-            params.seqLens[i] = v;
-            updateDerived();
-        });
-        ctxInp.on('change', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) v = 0;
-            v = Math.max(0, v);
-            params.seqLens[i] = v;
-            this.value = v;
-            updateDerived();
-            update();
-        });
-
-        // Query length (new tokens)
+        // S_q (new query tokens per request)
         const qInp = row.append('input')
             .attr('type', 'number')
             .attr('min', 1)
             .attr('step', 1)
             .property('value', params.queryLens[i]);
 
+        sInp.on('input', function() {
+            let v = parseInt(this.value, 10);
+            if (isNaN(v)) return;
+            v = Math.max(1, v);
+            params.seqLens[i] = v;
+            if (params.queryLens[i] > v) {
+                params.queryLens[i] = v;
+                qInp.property('value', v);
+            }
+            updateTypeLabel();
+            updateDerived();
+        });
+        sInp.on('change', function() {
+            let v = parseInt(this.value, 10);
+            if (isNaN(v)) v = 1;
+            v = Math.max(1, v);
+            params.seqLens[i] = v;
+            if (params.queryLens[i] > v) {
+                params.queryLens[i] = v;
+                qInp.property('value', v);
+            }
+            this.value = v;
+            updateTypeLabel();
+            updateDerived();
+            update();
+        });
+
         qInp.on('input', function() {
             let v = parseInt(this.value, 10);
             if (isNaN(v)) return;
             v = Math.max(1, v);
+            if (v > params.seqLens[i]) {
+                params.seqLens[i] = v;
+                sInp.property('value', v);
+            }
             params.queryLens[i] = v;
+            updateTypeLabel();
             updateDerived();
         });
         qInp.on('change', function() {
             let v = parseInt(this.value, 10);
             if (isNaN(v)) v = 1;
             v = Math.max(1, v);
+            if (v > params.seqLens[i]) {
+                params.seqLens[i] = v;
+                sInp.property('value', v);
+            }
             params.queryLens[i] = v;
             this.value = v;
+            updateTypeLabel();
             updateDerived();
             update();
         });
 
         // Type label (auto-detect prefill vs decode)
-        row.append('span')
-            .style('font-size', '9px')
-            .style('color', params.queryLens[i] > 1 ? '#f39c12' : '#3498db')
-            .text(params.queryLens[i] > 1 ? 'prefill' : 'decode');
+        const typeLabel = row.append('span')
+            .style('font-size', '9px');
+
+        function updateTypeLabel() {
+            const sq = params.queryLens[i];
+            const s = params.seqLens[i];
+            const type = sq === 1 ? 'decode' : sq >= s ? 'prefill' : 'extend';
+            const color = sq === 1 ? '#3498db' : sq >= s ? '#f39c12' : '#2ecc71';
+            typeLabel.style('color', color).text(type);
+        }
+        updateTypeLabel();
     }
 }
 
@@ -397,12 +461,10 @@ function updateDerived() {
         html += `<div class="derived-dim">Heads per rank: <span>${headsPerRank}</span></div>`;
     }
     if (params.pagedAttn) {
-        const ctxLens = params.seqLens.slice(0, params.B);
-        const queryLens = params.queryLens.slice(0, params.B);
-        const totalLens = ctxLens.map((c, i) => c + queryLens[i]);
-        const blocksPerSeq = totalLens.map(s => Math.ceil(s / params.block_size));
+        const sLens = params.seqLens.slice(0, params.B);
+        const blocksPerSeq = sLens.map(s => Math.ceil(s / params.block_size));
         const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
-        html += `<div class="derived-dim">Total per req: <span>[${totalLens.join(', ')}]</span></div>`;
+        html += `<div class="derived-dim">S per req: <span>[${sLens.join(', ')}]</span></div>`;
         html += `<div class="derived-dim">Blocks per req: <span>[${blocksPerSeq.join(', ')}]</span></div>`;
         html += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
     }
@@ -528,36 +590,26 @@ function addTpAnnotations(graph, params) {
 
 function addPagedAnnotations(graph, params) {
     const bs = params.block_size;
-    const ctxLens = [...params.seqLens].slice(0, params.B);
-    const queryLens = [...params.queryLens].slice(0, params.B);
-    // Total KV length per request = cached context + new tokens
-    const totalLens = ctxLens.map((c, i) => c + queryLens[i]);
-    const blocksPerSeq = totalLens.map(s => Math.ceil(s / bs));
+    const sLens = [...params.seqLens].slice(0, params.B);   // S per request (total KV length)
+    const sqLens = [...params.queryLens].slice(0, params.B); // S_q per request (new query tokens)
+    const blocksPerSeq = sLens.map(s => Math.ceil(s / bs));
     const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
 
     for (const t of graph.tensors) {
         if (t.type === 'mask') {
             t.pagedMask = true;
-            t.seqLens = totalLens;
-            t.queryLens = queryLens;
-            t.ctxLens = ctxLens;
-            const totalTokens = totalLens.reduce((a, b) => a + b, 0);
-            t.shape = [totalTokens, totalTokens];
-            t.dimNames = ['\u03a3_S', '\u03a3_S'];
-            const reqDescs = ctxLens.map((c, i) => `req${i}: ${queryLens[i]} new + ${c} cached`).join(', ');
-            t.desc = `Variable-length causal mask for paged attention. ${reqDescs}. Total ${totalTokens} tokens. Each request attends only within its own sequence (block-diagonal) and causally.`;
+            t.seqLens = sLens;
+            t.queryLens = sqLens;
+            const totalS = sLens.reduce((a, b) => a + b, 0);
+            const totalSq = sqLens.reduce((a, b) => a + b, 0);
+            t.shape = [totalSq, totalS];
+            t.dimNames = ['\u03a3S_q', '\u03a3S'];
+            const reqDescs = sLens.map((s, i) => `req${i}: S_q=${sqLens[i]}, S=${s}`).join(', ');
+            t.desc = `Variable-length causal mask for paged attention. ${reqDescs}. Each request attends only within its own sequence (block-diagonal) and causally.`;
         }
         // Mark KV cache tensors with paged layout
-        // MLA caches c_kv + k_r (not decompressed K, V)
-        const hasCKV = graph.tensors.some(t2 => t2.id === 'c_KV');
-        let isCache = false;
-        if (hasCKV) {
-            isCache = t.id === 'c_KV' || t.id === 'k_r';
-        } else {
-            isCache = t.id === 'K' || t.id === 'V' || t.id === 'K_1' || t.id === 'V_1' ||
-                      t.id === 'K_g' || t.id === 'V_g';
-        }
-        if (isCache) {
+        // Tensors with cache: true are the actual KV cache entries
+        if (t.cache) {
             t.badge = 'PAGED';
             // Derive per-token dims from shape (remove B and S)
             const perTokenDims = t.shape.length === 4
@@ -577,7 +629,7 @@ function addPagedAnnotations(graph, params) {
                 `Physical layout: ${layoutStr}. ` +
                 `Each sequence maps to non-contiguous blocks via a block table. ` +
                 `Block size=${bs}, blocks per seq: [${blocksPerSeq.join(', ')}], total blocks: ${totalBlocks}. ` +
-                `New tokens are appended to the last block; a new block is allocated when the current one fills.`;
+                `New S_q tokens are appended to the last block; a new block is allocated when the current one fills.`;
         }
     }
 }
@@ -599,7 +651,7 @@ svg.on('click', () => {
 const initPresetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
 const initPreset = PRESETS[initPresetIdx];
 if (initPreset && initPreset.variant) {
-    for (const key of ['B', 'S', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
         if (initPreset[key] != null) params[key] = initPreset[key];
     }
 }

@@ -16,12 +16,13 @@ export function drawMatmulDetail(svg, op, tensorMap) {
     // If B's last dim == A's inner dim AND output's last dim == B's second-to-last,
     // then B is transposed and cols come from B's second-to-last dim.
     let cols_b;
+    let bTransposed = false;
     if (B_tensor) {
         const bShape = B_tensor.shape;
         const bLast = bShape[bShape.length - 1];
         const bSecondLast = bShape.length >= 2 ? bShape[bShape.length - 2] : bLast;
-        const isTransposed = bLast === inner && shC[shC.length - 1] === bSecondLast && bLast !== bSecondLast;
-        cols_b = isTransposed ? bSecondLast : bLast;
+        bTransposed = bLast === inner && shC[shC.length - 1] === bSecondLast && bLast !== bSecondLast;
+        cols_b = bTransposed ? bSecondLast : bLast;
     } else {
         cols_b = shC[shC.length - 1];
     }
@@ -57,20 +58,23 @@ export function drawMatmulDetail(svg, op, tensorMap) {
     if (B_tensor) {
         const shB = B_tensor.shape;
         drawDetailBlock(g, originX, originY - hB - pad, wC, hB, B_tensor.color, B_tensor.label);
-        const bColName = B_tensor.dimNames ? B_tensor.dimNames[B_tensor.dimNames.length - 1] : '';
+        // When B is transposed (e.g. K^T), swap col/row dim names and values
+        const bDimNames = B_tensor.dimNames || [];
+        const bColName = bTransposed ? bDimNames[bDimNames.length - 2] || '' : bDimNames[bDimNames.length - 1] || '';
+        const bRowName = bTransposed ? bDimNames[bDimNames.length - 1] || '' : bDimNames[bDimNames.length - 2] || '';
+        const bRowVal = bTransposed ? shB[shB.length - 1] : shB[shB.length - 2];
         g.append('text').attr('class', 'dim-label')
             .attr('x', originX + wC / 2).attr('y', originY - hB - pad - 6)
             .attr('text-anchor', 'middle').text(bColName ? bColName + '=' + cols_b : cols_b);
-        const bRowName = B_tensor.dimNames ? B_tensor.dimNames[B_tensor.dimNames.length - 2] : '';
         g.append('text').attr('class', 'dim-label')
             .attr('x', originX - 8).attr('y', originY - hB - pad + hB / 2 + 3)
-            .attr('text-anchor', 'end').text(bRowName ? bRowName + '=' + shB[shB.length - 2] : inner);
+            .attr('text-anchor', 'end').text(bRowName ? bRowName + '=' + bRowVal : inner);
     }
 
     // Result C (center)
     drawDetailBlock(g, originX, originY, wC, hC, C.color, C.label);
     const resultColName = B_tensor && B_tensor.dimNames
-        ? B_tensor.dimNames[B_tensor.dimNames.length - 1]
+        ? (bTransposed ? B_tensor.dimNames[B_tensor.dimNames.length - 2] : B_tensor.dimNames[B_tensor.dimNames.length - 1])
         : (C.dimNames ? C.dimNames[C.dimNames.length - 1] : '');
     g.append('text').attr('class', 'dim-label')
         .attr('x', originX + wC / 2).attr('y', originY + hC + 14)

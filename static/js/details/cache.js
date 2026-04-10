@@ -2,10 +2,9 @@
 
 export function drawPagedCacheDetail(svg, _tensor, params) {
     const bs = params.block_size;
-    const ctxLens = params.seqLens.slice(0, params.B);
-    const queryLens = params.queryLens.slice(0, params.B);
-    const totalLens = ctxLens.map((c, i) => c + queryLens[i]);
-    const blocksPerSeq = totalLens.map(s => Math.ceil(s / bs));
+    const sLens = params.seqLens.slice(0, params.B);
+    const sqLens = params.queryLens.slice(0, params.B);
+    const blocksPerSeq = sLens.map(s => Math.ceil(s / bs));
     const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
     const pad = 20;
 
@@ -27,18 +26,18 @@ export function drawPagedCacheDetail(svg, _tensor, params) {
     const blockH = 24;
 
     // Draw block table per sequence
-    for (let si = 0; si < totalLens.length; si++) {
-        const sLen = totalLens[si];
+    for (let si = 0; si < sLens.length; si++) {
+        const sLen = sLens[si];
         const nBlocks = blocksPerSeq[si];
         const color = seqColors[si % seqColors.length];
-        const typeStr = queryLens[si] > 1 ? 'prefill' : 'decode';
+        const typeStr = sqLens[si] > 1 ? 'prefill' : 'decode';
 
         g.append('text').attr('class', 'dim-label')
             .attr('x', 0).attr('y', y + blockH / 2 + 3)
             .attr('fill', '#aaa').attr('font-size', '9px')
-            .text(`Req ${si} (${ctxLens[si]}+${queryLens[si]}, ${typeStr}):`);
+            .text(`Req ${si} (S_q=${sqLens[si]}, S=${sLen}, ${typeStr}):`);
 
-        const tableX = 120;
+        const tableX = 160;
         for (let bi = 0; bi < nBlocks; bi++) {
             const bx = tableX + bi * (blockW + 3);
             const tokensInBlock = Math.min(bs, sLen - bi * bs);
@@ -80,9 +79,9 @@ export function drawPagedCacheDetail(svg, _tensor, params) {
 
     // Draw physical blocks interleaved
     const physicalBlocks = [];
-    for (let si = 0; si < totalLens.length; si++) {
+    for (let si = 0; si < sLens.length; si++) {
         for (let bi = 0; bi < blocksPerSeq[si]; bi++) {
-            physicalBlocks.push({ seq: si, block: bi, tokens: Math.min(bs, totalLens[si] - bi * bs) });
+            physicalBlocks.push({ seq: si, block: bi, tokens: Math.min(bs, sLens[si] - bi * bs) });
         }
     }
     // Shuffle to show non-contiguous nature

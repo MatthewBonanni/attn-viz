@@ -4,9 +4,9 @@ const ISO_ANGLE = Math.PI / 6;
 const ISO_COS = Math.cos(ISO_ANGLE);
 const ISO_SIN = Math.sin(ISO_ANGLE);
 const DEPTH_SCALE = 0.4;
-const STAGE_GAP = 100;
+const STAGE_GAP = 130;
 const ROW_GAP = 30;
-const DIM_LABEL_OFFSET = 14;
+const DIM_LABEL_OFFSET = 8;
 const OP_RADIUS = 18;
 const ARROW_MARGIN = 4;
 const ARROWHEAD_LEN = 8;  // must match markerWidth in index.html
@@ -110,7 +110,7 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
     // Front face
     if (type === 'mask') {
         if (tensor.pagedMask && tensor.seqLens) {
-            drawPagedMaskFace(group, x, y, w, h, tensor.seqLens);
+            drawPagedMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens);
         } else {
             drawMaskFace(group, x, y, w, h, shape, color);
         }
@@ -321,23 +321,27 @@ function drawMaskFace(group, x, y, w, h, shape, color) {
 
 // --- Paged/variable-length mask face ---
 
-function drawPagedMaskFace(group, x, y, w, h, seqLens) {
+function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens) {
+    const sqLens = queryLens || seqLens;
     const totalS = seqLens.reduce((a, b) => a + b, 0);
+    const totalSq = sqLens.reduce((a, b) => a + b, 0);
     const cellW = w / totalS;
-    const cellH = h / totalS;
+    const cellH = h / totalSq;
     const color = '#1abc9c';
     const blocked = '#2c3e50';
     const crossSeq = '#1a1520';
+    const totalCells = totalSq * totalS;
 
     let rowOffset = 0;
-    for (let si = 0; si < seqLens.length; si++) {
+    for (let si = 0; si < sqLens.length; si++) {
+        const qLen = sqLens[si];
         const sLen = seqLens[si];
         let colOffset = 0;
 
         for (let sj = 0; sj < seqLens.length; sj++) {
             const sLenJ = seqLens[sj];
 
-            for (let i = 0; i < sLen; i++) {
+            for (let i = 0; i < qLen; i++) {
                 for (let j = 0; j < sLenJ; j++) {
                     const globalI = rowOffset + i;
                     const globalJ = colOffset + j;
@@ -346,15 +350,13 @@ function drawPagedMaskFace(group, x, y, w, h, seqLens) {
                     if (si !== sj) {
                         fill = crossSeq;
                         opacity = 0.8;
-                    } else if (i >= j) {
-                        fill = color;
-                        opacity = 0.85;
                     } else {
-                        fill = blocked;
-                        opacity = 0.5;
+                        const allowed = j <= (sLen - qLen + i);
+                        fill = allowed ? color : blocked;
+                        opacity = allowed ? 0.85 : 0.5;
                     }
 
-                    if (totalS <= 20) {
+                    if (totalCells <= 400) {
                         group.append('rect')
                             .attr('x', x + globalJ * cellW)
                             .attr('y', y + globalI * cellH)
@@ -369,23 +371,24 @@ function drawPagedMaskFace(group, x, y, w, h, seqLens) {
             }
             colOffset += sLenJ;
         }
-        rowOffset += sLen;
+        rowOffset += qLen;
     }
 
-    // If too many tokens, draw simplified block-diagonal
-    if (totalS > 20) {
+    // If too many cells, draw simplified block-diagonal
+    if (totalCells > 400) {
         group.append('rect')
             .attr('x', x).attr('y', y)
             .attr('width', w).attr('height', h)
             .attr('fill', crossSeq).attr('fill-opacity', 0.8);
 
-        let offset = 0;
-        for (let si = 0; si < seqLens.length; si++) {
+        let rowOff = 0, colOff = 0;
+        for (let si = 0; si < sqLens.length; si++) {
+            const qLen = sqLens[si];
             const sLen = seqLens[si];
-            const bx = x + offset * cellW;
-            const by = y + offset * cellH;
+            const bx = x + colOff * cellW;
+            const by = y + rowOff * cellH;
             const bw = sLen * cellW;
-            const bh = sLen * cellH;
+            const bh = qLen * cellH;
             // Causal triangle within block
             group.append('polygon')
                 .attr('points', polyStr([[bx, by], [bx, by + bh], [bx + bw, by + bh]]))
@@ -398,7 +401,8 @@ function drawPagedMaskFace(group, x, y, w, h, seqLens) {
                 .attr('x1', bx).attr('y1', by)
                 .attr('x2', bx + bw).attr('y2', by + bh)
                 .attr('stroke', '#fff').attr('stroke-width', 0.5).attr('stroke-opacity', 0.3);
-            offset += sLen;
+            rowOff += qLen;
+            colOff += sLen;
         }
     }
 
@@ -445,7 +449,7 @@ function annotateEdge(group, x1, y1, x2, y2, name, value, position) {
     if (position === 'bottom') {
         tx = mx; ty = my + DIM_LABEL_OFFSET; anchor = 'middle';
     } else if (position === 'left') {
-        tx = x1 - DIM_LABEL_OFFSET; ty = my + 3; anchor = 'end';
+        tx = x1 - 3; ty = my + 14; anchor = 'end';
     } else if (position === 'depth') {
         tx = mx + 8; ty = my - 6; anchor = 'start';
     }
@@ -619,6 +623,25 @@ export function computeLayout(graph, sharedStageX) {
         for (const op of group) op._x = maxX;
     }
 
+    // Clamp ops so circles don't overlap output tensor's left dim labels.
+    // Left labels use text-anchor:end and extend leftward from the tensor edge,
+    // so we must account for the approximate text width of the label.
+    for (const op of graph.ops) {
+        const output = tensorMap[op.output];
+        if (!output || output._layoutX == null || op._x == null) continue;
+        // Estimate left dim label text width (format: "name=value", ~6px per char at 9px font)
+        let leftLabelW = 0;
+        if (output.dimNames && output.shape) {
+            const dimIdx = output.shape.length >= 3 ? output.shape.length - 2 : 0;
+            const name = output.dimNames[dimIdx] || '';
+            const value = output.shape[dimIdx];
+            const text = name ? `${name}=${value}` : `${value}`;
+            leftLabelW = text.length * 6;
+        }
+        const maxX = (output._layoutX || 0) - OP_RADIUS - DIM_LABEL_OFFSET - ARROW_MARGIN - leftLabelW;
+        if (op._x > maxX) op._x = maxX;
+    }
+
     graph._stageXRanges = stageXRanges;
     graph._centerY = centerY;
     graph._maxTotalH = totalH;
@@ -682,6 +705,7 @@ function opColor(type) {
         broadcast: '#3498db', reshape: '#95a5a6',
         compress: '#e67e22', decompress: '#e67e22',
         rope: '#ff7043', add: '#3498db',
+        cache: '#16a085',
     };
     return colors[type] || '#95a5a6';
 }
@@ -692,6 +716,7 @@ function opSymbol(type) {
         broadcast: '⇒', reshape: '↺',
         compress: '↓', decompress: '↑',
         rope: '⟳', add: '+',
+        cache: '⤓',
     };
     return symbols[type] || '?';
 }
@@ -728,6 +753,7 @@ export function drawArrows(g, graph) {
         // Pull back endpoint by arrowhead length so tip touches the tensor edge
         drawRoutedArrow(g, op._x + OP_RADIUS + ARROW_MARGIN, op._y,
             out._layoutX - ARROWHEAD_LEN, out._layoutY + outGeo.h / 2, graph, [out.id]);
+
     }
 }
 
@@ -790,7 +816,51 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
     // Draw arrows first (behind everything)
     drawArrows(g, graph);
 
-    // Draw tensors
+    // Draw dashed enclosure around KV cache tensors
+    const cacheTensors = graph.tensors.filter(t => t.cache && t._layoutX != null);
+    if (cacheTensors.length > 0) {
+        const pad = 12;
+        const rects = cacheTensors.map(t => {
+            const b = tensorBounds(t.shape);
+            const geo = tensorGeometry(t.shape);
+            return { left: t._layoutX, top: t._layoutY - 18, right: t._layoutX + b.totalW, bottom: t._layoutY + geo.h + DIM_LABEL_OFFSET };
+        });
+        const x0 = Math.min(...rects.map(r => r.left)) - pad;
+        const y0 = Math.min(...rects.map(r => r.top)) - pad;
+        const x1 = Math.max(...rects.map(r => r.right)) + pad;
+        const y1 = Math.max(...rects.map(r => r.bottom)) + pad;
+        const labelH = 16;
+        g.append('rect')
+            .attr('x', x0).attr('y', y0 - labelH)
+            .attr('width', x1 - x0).attr('height', y1 - y0 + labelH)
+            .attr('rx', 8).attr('ry', 8)
+            .attr('fill', 'none')
+            .attr('stroke', '#16a085')
+            .attr('stroke-width', 1.5)
+            .attr('stroke-dasharray', '6,4')
+            .attr('stroke-opacity', 0.5);
+        g.append('text')
+            .attr('x', (x0 + x1) / 2).attr('y', y0 - 4)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#16a085')
+            .attr('font-size', '10px')
+            .attr('font-weight', 'bold')
+            .text('KV CACHE');
+    }
+
+    // Draw ops before tensors so tensor dim labels aren't hidden behind op circles
+    for (const op of graph.ops) {
+        if (op._x == null) continue;
+        const opGroup = drawOpNode(g, op, (clickedOp) => {
+            const scope = deselectScope || g;
+            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
+            scope.selectAll('.op-node').classed('selected', false);
+            opGroup.classed('selected', true);
+            if (onOpClick) onOpClick(clickedOp);
+        });
+    }
+
+    // Draw tensors (on top of ops so dim labels are visible)
     for (const t of graph.tensors) {
         if (t._layoutX == null) continue;
         const dimNames = t.dimNames || [];
@@ -838,18 +908,6 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
 
         block.on('mouseleave.tooltip', () => {
             d3.select('#tooltip').classed('visible', false);
-        });
-    }
-
-    // Draw ops — hover handled via CSS, JS only toggles .selected class
-    for (const op of graph.ops) {
-        if (op._x == null) continue;
-        const opGroup = drawOpNode(g, op, (clickedOp) => {
-            const scope = deselectScope || g;
-            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
-            scope.selectAll('.op-node').classed('selected', false);
-            opGroup.classed('selected', true);
-            if (onOpClick) onOpClick(clickedOp);
         });
     }
 }

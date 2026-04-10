@@ -1,5 +1,12 @@
 // softmax.js — Softmax bar chart section
 
+function pseudoScore(i, j) {
+    let h = (i * 374761 + j * 668265) ^ 0x5bd1e995;
+    h = Math.imul(h ^ (h >>> 13), 0x5bd1e995);
+    h = h ^ (h >>> 15);
+    return 0.3 + ((h >>> 0) / 0xffffffff) * 1.4;
+}
+
 export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights) {
     const exampleRow = Math.min(4, dispS - 1);
 
@@ -15,7 +22,7 @@ export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights)
         const rawScores = [];
         for (let j = 0; j < dispS; j++) {
             if (j <= exampleRow) {
-                rawScores.push(1.0 + Math.sin(j * 1.7 + exampleRow * 0.3) * 0.7);
+                rawScores.push(pseudoScore(exampleRow, j));
             } else {
                 rawScores.push(-Infinity);
             }
@@ -37,20 +44,27 @@ export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights)
         .attr('font-size', '9px')
         .text(`row ${exampleRow}`);
 
+    // Decide label density based on bar width
+    const showBarText = barW >= 14;
+    let labelEvery;
+    if (barW >= 14) labelEvery = 1;
+    else if (barW >= 6) labelEvery = Math.ceil(10 / barW);
+    else labelEvery = 0;
+
     for (let j = 0; j < dispS; j++) {
         const allowed = j <= exampleRow;
         const barH = allowed ? (probs[j] / maxProb) * barMaxH : 0;
 
         g.append('rect')
-            .attr('x', x + j * barW + 1)
+            .attr('x', x + j * barW + (barW > 3 ? 1 : 0))
             .attr('y', barBaseY + barMaxH - barH)
-            .attr('width', barW - 2)
+            .attr('width', barW - (barW > 3 ? 2 : 0))
             .attr('height', Math.max(barH, 1))
             .attr('fill', allowed ? '#f39c12' : '#2c3e50')
             .attr('fill-opacity', allowed ? 0.85 : 0.4)
-            .attr('rx', 1);
+            .attr('rx', barW >= 4 ? 1 : 0);
 
-        if (barW >= 14) {
+        if (showBarText) {
             g.append('text')
                 .attr('x', x + j * barW + barW / 2)
                 .attr('y', barBaseY + barMaxH + 12)
@@ -62,11 +76,12 @@ export function drawSoftmaxSection(g, x, y, dispS, cellSize, precomputedWeights)
     }
 
     // "sum = 1" annotation below bars
+    const sumLabelY = barBaseY + barMaxH + (showBarText ? 30 : 14);
     g.append('text').attr('class', 'dim-label')
-        .attr('x', x + dispS * barW / 2).attr('y', barBaseY + barMaxH + 30)
+        .attr('x', x + dispS * barW / 2).attr('y', sumLabelY)
         .attr('text-anchor', 'middle').attr('fill', '#f39c12')
         .attr('font-size', '10px')
         .text('each row sums to 1');
 
-    return barBaseY + barMaxH + 46;
+    return sumLabelY + 16;
 }
