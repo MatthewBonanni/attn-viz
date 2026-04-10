@@ -103,10 +103,10 @@ export function computeOpCost(op, tensorMap) {
         }
 
         case 'rope': {
-            // RoPE: ~6 FLOPs per pair of dimensions (sin, cos, 2 multiplies, 1 add, 1 sub)
-            // Applied to d_r dimensions (or all d_h if no d_r)
+            // RoPE: 6 FLOPs per pair of dimensions (sin, cos, 2 multiplies, 1 add, 1 sub)
+            // = 3 FLOPs per element (each pair covers 2 elements)
             const elements = tensorElements(output.shape);
-            const flops = 6 * elements; // conservative: applies to all dims
+            const flops = 3 * elements;
             const readBytes = inputs[0] ? tensorBytes(inputs[0].shape) : 0;
             const writeBytes = outBytes;
 
@@ -167,10 +167,10 @@ export function computeOpCost(op, tensorMap) {
 
 // GPU specs for roofline reference
 export const GPU_SPECS = {
-    'A100 SXM': { peakTFLOPS_bf16: 312, bandwidthTBs: 2.0, label: 'A100 SXM (80GB)' },
-    'H100 SXM': { peakTFLOPS_bf16: 990, bandwidthTBs: 3.35, label: 'H100 SXM (80GB)' },
-    'B200':     { peakTFLOPS_bf16: 2250, bandwidthTBs: 8.0, label: 'B200 (192GB)' },
-    'B300':     { peakTFLOPS_bf16: 2250, bandwidthTBs: 12.0, label: 'B300 (288GB)' },
+    'A100 SXM': { peakTFLOPS_bf16: 312,  bandwidthTBs: 2.0,  label: 'A100 SXM (80GB)' },
+    'H100 SXM': { peakTFLOPS_bf16: 990,  bandwidthTBs: 3.35, label: 'H100 SXM (80GB)' },
+    'B200':     { peakTFLOPS_bf16: 2250, bandwidthTBs: 7.7,  label: 'B200 (180GB)' },
+    'B300':     { peakTFLOPS_bf16: 3500, bandwidthTBs: 8.0,  label: 'B300 (288GB)' },
 };
 
 // Compute pipeline totals for a graph

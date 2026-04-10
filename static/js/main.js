@@ -631,7 +631,7 @@ function renderMlaStacked() {
         .attr('font-size', '13px')
         .attr('font-weight', '600')
         .attr('font-family', 'Inter, system-ui, sans-serif')
-        .text('MHA-style (up-proj) — Prefill Path');
+        .text('MHA-style (up-projected)');
 
 
     // Render decode path below
@@ -659,9 +659,9 @@ function renderMlaStacked() {
         .attr('font-size', '13px')
         .attr('font-weight', '600')
         .attr('font-family', 'Inter, system-ui, sans-serif')
-        .text('MQA-style (absorbed) — Decode Path');
+        .text('MQA-style (absorbed)');
 
-    updateStatsOverlay([upprojGraph, absorbedGraph], ['MHA-style (up-proj) — Prefill', 'MQA-style (absorbed) — Decode']);
+    updateStatsOverlay([upprojGraph, absorbedGraph], ['MHA-style (up-projected)', 'MQA-style (absorbed)']);
 
     refreshDetail([upprojGraph, absorbedGraph], params);
 }

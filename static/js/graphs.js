@@ -290,7 +290,7 @@ export function mlaUpprojGraph(p) {
     const D = n_h * d_h;
     const dr = d_r || 64;
     return {
-        id: 'mla_upproj', label: 'MLA — Prefill Path (Up-projected)',
+        id: 'mla_upproj', label: 'MLA — MHA-style (Up-projected)',
         tensors: [
             { id: 'X',      shape: [B, S_q, D],           label: 'X',        stage: 0, row: 1, color: '#4a90d9', dimNames: ['B','S_q','D'],
               desc: 'Input activation tensor.' },
@@ -405,7 +405,7 @@ export function mlaAbsorbedGraph(p) {
     const D = n_h * d_h;
     const dr = d_r || 64;
     return {
-        id: 'mla_absorbed', label: 'MLA — Decode Path (Absorbed)',
+        id: 'mla_absorbed', label: 'MLA — MQA-style (Absorbed)',
         tensors: [
             { id: 'X',        shape: [B, S_q, D],           label: 'X',        stage: 0, row: 1, color: '#4a90d9', dimNames: ['B','S_q','D'],
               desc: 'Input activation tensor.' },
