@@ -15,22 +15,31 @@ export function drawBroadcastDetail(svg, op, tensorMap) {
     const inNames = input.dimNames || [];
     const outNames = output.dimNames || [];
 
-    const scale = (v) => Math.max(24, Math.min(90, Math.sqrt(v) * 7));
+    // Use a single scale factor across both shapes so aspect ratios are preserved.
+    const maxBlockPx = 90;
+    const allFaceDims = [
+        inShape[inShape.length - 1], inShape[inShape.length - 2],
+        outShape[outShape.length - 1], outShape[outShape.length - 2],
+    ];
+    const maxSqrt = Math.max(...allFaceDims.map(v => Math.sqrt(v)));
+    const scaleFactor = maxSqrt > 0 ? maxBlockPx / maxSqrt : 7;
+    const scale = (v) => Math.max(24, Math.min(maxBlockPx, Math.sqrt(v) * scaleFactor));
 
     // Input block dimensions
     const inW = scale(inShape[inShape.length - 1]);
     const inH = scale(inShape[inShape.length - 2]);
     const inDepthVal = inShape.length >= 3 ? inShape[0] * (inShape.length >= 4 ? inShape[1] : 1) : 1;
-    const inD = Math.max(10, Math.min(35, Math.sqrt(inDepthVal) * 5));
+    const inD = Math.max(10, Math.min(35, Math.sqrt(inDepthVal) * scaleFactor * 0.7));
 
     // Output block dimensions
     const outW = scale(outShape[outShape.length - 1]);
     const outH = scale(outShape[outShape.length - 2]);
     const outDepthVal = outShape.length >= 3 ? outShape[0] * (outShape.length >= 4 ? outShape[1] : 1) : 1;
-    const outD = Math.max(10, Math.min(60, Math.sqrt(outDepthVal) * 5));
+    const outD = Math.max(10, Math.min(60, Math.sqrt(outDepthVal) * scaleFactor * 0.7));
 
     // Center the two blocks with arrow in available width
-    const arrowGap = 50;
+    // Reshape/view ops need wider gap since input depth label + output left label crowd the arrow
+    const arrowGap = op.type === 'reshape' ? 100 : 50;
     const totalBlockW = inW + inD * 0.7 + arrowGap + outW + outD * 0.7;
     const inX = Math.max(30, (mid * 2 - totalBlockW) / 2);
     const topPad = Math.max(inD, outD) * 0.4 + 10;
@@ -62,13 +71,13 @@ export function drawBroadcastDetail(svg, op, tensorMap) {
     }
 
     // Arrow
-    const arrowX = inX + inW + inD * 0.7 + 25;
+    const arrowX = inX + inW + inD * 0.7 + arrowGap / 2;
     g.append('text').attr('x', arrowX).attr('y', blockY + inH / 2 + 4)
         .attr('fill', '#888').attr('font-size', '24px')
         .attr('text-anchor', 'middle').text('\u2192');
 
     // Draw output block
-    const outX = arrowX + 25;
+    const outX = inX + inW + inD * 0.7 + arrowGap;
     const outGrp = outShape.length === 4 ? { outer: outShape[0], inner: outShape[1] } : null;
     drawDetailBlock3D(g, outX, blockY, outW, outH, outD, output.color, output.label, outGrp);
 

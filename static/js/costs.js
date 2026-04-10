@@ -144,7 +144,8 @@ export function computeOpCost(op, tensorMap) {
             };
         }
 
-        case 'broadcast': {
+        case 'broadcast':
+        case 'reshape': {
             // Logical operation, no FLOPs or real memory transfer
             return { flops: 0, readBytes: 0, writeBytes: 0, arithmeticIntensity: 0, breakdown: [] };
         }

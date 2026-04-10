@@ -1,6 +1,6 @@
 // main.js — Entry point: D3 setup, zoom/pan, sliders, presets, toggles, update loop
 
-import { renderGraph, computeSharedStagePositions } from './render.js';
+import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
 import { computePipelineTotals, fmtNum, fmtBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
@@ -789,6 +789,7 @@ function update() {
     if (!graphFn) return;
     const graph = graphFn(params);
     annotateGraph(graph);
+    setDimScaleContext(graph);
 
     renderGraph(scene, graph, params,
         (op) => showDetail(op, graph, params),
@@ -807,6 +808,7 @@ function renderMlaStacked() {
     const absorbedGraph = mlaAbsorbedGraph(params);
     annotateGraph(upprojGraph);
     annotateGraph(absorbedGraph);
+    setDimScaleContext(upprojGraph, absorbedGraph);
 
     // Compute shared stage positions so both paths align horizontally
     const sharedStageX = computeSharedStagePositions(upprojGraph, absorbedGraph);

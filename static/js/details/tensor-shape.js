@@ -30,13 +30,25 @@ export function drawTensorShapeDetail(svg, tensor, params) {
         .attr('text-anchor', 'middle').attr('fill', '#7c8cf8')
         .text(`[${shapeStr}]`);
 
-    // Draw a visual representation — fixed size to fill available space
-    // (relative sizes are shown in the graph and op details)
-    const blockW = Math.min(200, mid * 0.9);
-    const blockH = 120;
+    // Draw a proportional visual representation.
+    // Scale dimensions so aspect ratios are preserved using sqrt scaling,
+    // fitting within the available detail panel space.
+    const maxBlockW = Math.min(200, mid * 0.9);
+    const maxBlockH = 140;
+    const minBlockDim = 24;
+
+    // Given raw dimension values for [height, width], return scaled pixel
+    // sizes that preserve the sqrt-ratio and fit within maxBlockH × maxBlockW.
+    function detailScale2(rawH, rawW) {
+        const sh = Math.sqrt(rawH), sw = Math.sqrt(rawW);
+        // Find a single scale factor that fits both axes
+        const factor = Math.min(maxBlockH / sh, maxBlockW / sw);
+        return [Math.max(minBlockDim, sh * factor),
+                Math.max(minBlockDim, sw * factor)];
+    }
 
     if (shape.length === 2) {
-        const w = blockW, h = blockH;
+        const [h, w] = detailScale2(shape[0], shape[1]);
         const x = mid - w / 2, y = 36;
         drawDetailBlock(g, x, y, w, h, tensor.color, tensor.label);
 
@@ -51,12 +63,17 @@ export function drawTensorShapeDetail(svg, tensor, params) {
 
         svg.attr('height', 24 + y + h + 56);
     } else if (shape.length >= 3) {
-        const w = blockW;
-        const h = blockH;
-        const d = 45;
+        const rawW = shape[shape.length - 1];
+        const rawH = shape[shape.length - 2];
+        const depth = shape.length === 4 ? shape[0] * shape[1] : shape[0];
+        const [h, w] = detailScale2(rawH, rawW);
+        // Scale depth proportionally: use same factor as the larger face axis,
+        // then cap so the isometric offset doesn't dominate the panel.
+        const maxFaceSqrt = Math.max(Math.sqrt(rawH), Math.sqrt(rawW));
+        const faceFactor = maxFaceSqrt > 0 ? Math.max(w, h) / maxFaceSqrt : 1;
+        const d = Math.max(16, Math.min(50, Math.sqrt(depth) * faceFactor * 0.35));
         const dxTotal = d * 0.7;
         const dyTotal = -d * 0.4;
-        const depth = shape.length === 4 ? shape[0] * shape[1] : shape[0];
         const x = mid - w / 2, y = d * 0.4 + 36;
 
         const grp = shape.length === 4 ? { outer: shape[0], inner: shape[1] } : null;

@@ -16,9 +16,36 @@ export const TP_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1a
 
 // --- Scale ---
 
+// Module-level scale factor: computed from the max dimension across all
+// tensors so that the largest dimension maps to MAX_DIM_PX and aspect
+// ratios are preserved.
+const MAX_DIM_PX = 180;
+const MIN_DIM_PX = 24;
+let _dimScaleFactor = 10;   // default fallback (matches legacy behaviour for small values)
+
+// Call before rendering to calibrate dimScale for the current set of graphs.
+// Collects every raw dimension value from every tensor shape and sets a
+// global scale factor so that sqrt(maxValue) * factor == MAX_DIM_PX.
+export function setDimScaleContext(...graphs) {
+    let maxRaw = 0;
+    for (const graph of graphs) {
+        for (const t of graph.tensors) {
+            for (const v of t.shape) {
+                if (v > maxRaw) maxRaw = v;
+            }
+            // 4D tensors combine shape[0]*shape[1] for depth
+            if (t.shape.length === 4) {
+                const combined = t.shape[0] * t.shape[1];
+                if (combined > maxRaw) maxRaw = combined;
+            }
+        }
+    }
+    _dimScaleFactor = maxRaw > 0 ? MAX_DIM_PX / Math.sqrt(maxRaw) : 10;
+}
+
 export function dimScale(value) {
-    const scaled = Math.sqrt(value) * 10;
-    return Math.max(24, Math.min(180, scaled));
+    const scaled = Math.sqrt(value) * _dimScaleFactor;
+    return Math.max(MIN_DIM_PX, Math.min(MAX_DIM_PX, scaled));
 }
 
 // --- Isometric helpers ---
@@ -667,12 +694,16 @@ export function drawOpNode(g, op, onClick) {
             onClick(op);
         });
 
-    group.append('circle')
+    const circle = group.append('circle')
         .attr('cx', op._x).attr('cy', op._y)
         .attr('r', OP_RADIUS)
         .attr('fill', '#1e2030')
         .attr('stroke', opColor(op.type))
         .attr('stroke-width', 2);
+    // Reshape ops are zero-cost metadata ops — dashed border to indicate no-op
+    if (op.type === 'reshape') {
+        circle.attr('stroke-dasharray', '4,3');
+    }
 
     const sym = opSymbol(op.type);
     // Per-glyph nudges: some Unicode symbols have asymmetric shapes
@@ -722,7 +753,7 @@ function opColor(type) {
 function opSymbol(type) {
     const symbols = {
         matmul: '×', mask: '▽', softmax: 'σ',
-        broadcast: '⇒', reshape: '↺',
+        broadcast: '⇒', reshape: '⧉',
         compress: '↓', decompress: '↑',
         rope: '⟳', add: '+',
         cache: '⤓',

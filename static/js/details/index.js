@@ -86,6 +86,7 @@ function _renderOpDetail(op, graph, params) {
             }
             break;
         case 'broadcast':
+        case 'reshape':
             drawBroadcastDetail(svg, op, tensorMap);
             break;
         case 'rope':

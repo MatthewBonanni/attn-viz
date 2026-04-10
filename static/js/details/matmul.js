@@ -28,7 +28,11 @@ export function drawMatmulDetail(svg, op, tensorMap) {
     }
 
     const maxDim = Math.min(180, svgW * 0.35);
-    const scale = (v) => Math.max(24, Math.min(maxDim, Math.sqrt(v) * 12));
+    // Use a single scale factor across all dims so aspect ratios are preserved.
+    const allDims = [rows_a, inner, cols_b];
+    const maxSqrt = Math.max(...allDims.map(v => Math.sqrt(v)));
+    const scaleFactor = maxSqrt > 0 ? maxDim / maxSqrt : 12;
+    const scale = (v) => Math.max(24, Math.min(maxDim, Math.sqrt(v) * scaleFactor));
 
     const wA = scale(inner);
     const hA = scale(rows_a);
@@ -153,22 +157,30 @@ export function drawMatmulDetail(svg, op, tensorMap) {
             .text('Reshape / Concat Heads');
         noteY += 24;
 
-        // Scale for reshape blocks — large enough to read clearly
-        const reshScale = (v) => Math.max(30, Math.min(120, Math.sqrt(v) * 8));
+        // Scale for reshape blocks — ratio-preserving across both shapes
+        const reshMaxPx = 120;
+        const reshFaceDims = [
+            matmulResultShape[matmulResultShape.length - 1],
+            matmulResultShape[matmulResultShape.length - 2],
+            shC[shC.length - 1], shC[shC.length - 2],
+        ];
+        const reshMaxSqrt = Math.max(...reshFaceDims.map(v => Math.sqrt(v)));
+        const reshFactor = reshMaxSqrt > 0 ? reshMaxPx / reshMaxSqrt : 8;
+        const reshScale = (v) => Math.max(30, Math.min(reshMaxPx, Math.sqrt(v) * reshFactor));
 
         // Before block dimensions (matmul result shape)
         const beforeW = reshScale(matmulResultShape[matmulResultShape.length - 1]);
         const beforeH = reshScale(matmulResultShape[matmulResultShape.length - 2]);
         const beforeDepthVal = matmulResultShape.length >= 3
             ? matmulResultShape.slice(0, -2).reduce((a, b) => a * b, 1) : 1;
-        const beforeD = Math.max(12, Math.min(40, Math.sqrt(beforeDepthVal) * 5));
+        const beforeD = Math.max(12, Math.min(40, Math.sqrt(beforeDepthVal) * reshFactor * 0.6));
 
         // After block dimensions (final output shape)
         const afterW = reshScale(shC[shC.length - 1]);
         const afterH = reshScale(shC[shC.length - 2]);
         const afterDepthVal = shC.length >= 3
             ? shC.slice(0, -2).reduce((a, b) => a * b, 1) : 1;
-        const afterD = Math.max(12, Math.min(40, Math.sqrt(afterDepthVal) * 5));
+        const afterD = Math.max(12, Math.min(40, Math.sqrt(afterDepthVal) * reshFactor * 0.6));
 
         // Layout: center both blocks + arrow in available width
         const arrowGap = 100;
