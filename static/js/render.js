@@ -284,20 +284,24 @@ function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
 
 function drawMaskFace(group, x, y, w, h, shape, color) {
     const S = shape[shape.length - 1];
+    const S_q = shape.length >= 2 ? shape[shape.length - 2] : S;
     const blocked = '#2c3e50';
+    // Causal offset: query row i attends to keys 0..S-S_q+i
+    const offset = S - S_q;
 
-    if (S <= 16) {
+    if (S <= 16 && S_q <= 16) {
         const cellW = w / S;
-        const cellH = h / S;
-        for (let i = 0; i < S; i++) {
+        const cellH = h / S_q;
+        for (let i = 0; i < S_q; i++) {
             for (let j = 0; j < S; j++) {
+                const allowed = j <= offset + i;
                 group.append('rect')
                     .attr('x', x + j * cellW)
                     .attr('y', y + i * cellH)
                     .attr('width', cellW)
                     .attr('height', cellH)
-                    .attr('fill', i >= j ? color : blocked)
-                    .attr('fill-opacity', i >= j ? 0.85 : 0.6)
+                    .attr('fill', allowed ? color : blocked)
+                    .attr('fill-opacity', allowed ? 0.85 : 0.6)
                     .attr('stroke', '#1a1d2a')
                     .attr('stroke-width', 0.5);
             }
@@ -309,11 +313,15 @@ function drawMaskFace(group, x, y, w, h, shape, color) {
             .attr('fill', blocked).attr('fill-opacity', 0.6)
             .attr('stroke', d3.color(color).darker(0.3))
             .attr('stroke-width', 1);
+        // Causal triangle: diagonal goes from (offset/S * w, 0) to (w, h)
+        const diagX = (offset / S) * w;
         group.append('polygon')
-            .attr('points', polyStr([[x, y], [x, y + h], [x + w, y + h]]))
+            .attr('points', polyStr([
+                [x, y], [x, y + h], [x + w, y + h], [x + diagX, y]
+            ]))
             .attr('fill', color).attr('fill-opacity', 0.85);
         group.append('line')
-            .attr('x1', x).attr('y1', y)
+            .attr('x1', x + diagX).attr('y1', y)
             .attr('x2', x + w).attr('y2', y + h)
             .attr('stroke', '#fff').attr('stroke-width', 1).attr('stroke-opacity', 0.3);
     }
