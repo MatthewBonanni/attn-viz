@@ -116,11 +116,7 @@ function _renderOpDetail(op, graph, params) {
             drawMatmulDetail(svg, op, tensorMap);
             break;
         case 'mask':
-            if (params.pagedAttn) {
-                drawPagedMaskDetail(svg, op, tensorMap, params);
-            } else {
-                drawMaskDetail(svg, op, tensorMap, params);
-            }
+            drawMaskDetail(svg, op, tensorMap, params);
             break;
         case 'broadcast':
         case 'reshape':
@@ -169,9 +165,9 @@ function _renderTensorDetail(tensor, params) {
     svg.selectAll('*').remove();
 
     if (tensor.badge === 'PAGED' && params.pagedAttn) {
-        svg.attr('height', 100);
+        svg.attr('height', 400);
         drawPagedCacheDetail(svg, tensor, params);
-    } else if (tensor.type === 'mask' && tensor.pagedMask && params.pagedAttn) {
+    } else if (tensor.type === 'mask' && tensor.multiRequest) {
         svg.attr('height', 350);
         drawPagedMaskTensorDetail(svg, tensor, params);
     } else if (tensor.type === 'mask') {

@@ -17,7 +17,7 @@ const VARIANTS = [
 ];
 
 const SLIDER_DEFS = {
-    B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 2 },
+    B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 4 },
     S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
     S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
@@ -48,6 +48,10 @@ const PRESETS = [
     { name: 'Llama 3.1 405B', variant: 'gqa', n_h: 128, d_h: 128, n_kv: 8 },
     { name: 'Mistral 7B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8 },
     { name: 'Qwen 2.5 72B', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
+    { name: 'Qwen 3 235B (MoE)', variant: 'gqa', n_h: 64, d_h: 192, n_kv: 4 },
+    { name: 'Gemma 3 27B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 16 },
+    { name: 'Phi-4 14B', variant: 'gqa', n_h: 40, d_h: 128, n_kv: 10 },
+    { name: 'Command A (111B, MoE)', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'StarCoder (15B)', variant: 'mqa', n_h: 48, d_h: 128 },
     { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
 ];
@@ -56,8 +60,8 @@ const PRESETS = [
 const VARIANT_DEFAULT_PRESETS = {
     mha: 1,   // GPT-2 (124M)
     gqa: 3,   // Llama 3.1 8B
-    mqa: 8,   // StarCoder (15B)
-    mla: 9,   // DeepSeek R1
+    mqa: 12, // StarCoder (15B)
+    mla: 13, // DeepSeek R1
 };
 
 // --- State ---
@@ -71,8 +75,8 @@ params.flashAttn = false;
 params.block_q = 128;
 params.block_kv = 128;
 params.splitKV = false;
-params.seqLens = [8, 9];     // per-request total S (cached + new)
-params.queryLens = [4, 1];   // per-request S_q (new query tokens)
+params.seqLens = [params.S];     // per-request total S (cached + new)
+params.queryLens = [params.S_q]; // per-request S_q (new query tokens)
 
 let currentVariant = 'mha';
 
@@ -181,7 +185,6 @@ function setupToggles() {
     d3.select('#toggle-paged').on('click', function() {
         params.pagedAttn = !params.pagedAttn;
         d3.select(this).classed('active', params.pagedAttn);
-        d3.select('#seq-lengths').classed('visible', params.pagedAttn);
         buildSliders();
         update();
     });
@@ -266,8 +269,13 @@ function buildSlider(container, key) {
         numInput.property('value', params[key]);
         rangeInput.property('value', valToSlider(params[key]));
 
-        // Extend seqLens/queryLens arrays BEFORE update() so addPagedAnnotations sees the right length
-        if ((key === 'B' || key === 'S') && params.pagedAttn) buildSeqLengthInputs();
+        // When B changes, rebuild the S/S_q section without touching the B slider itself
+        if (key === 'B') {
+            rebuildSeqSliders();
+            updateDerived();
+            update();
+            return;
+        }
 
         updateDerived();
         update();
@@ -287,20 +295,8 @@ function buildSlider(container, key) {
                 }
             });
         }
-        // Keep S and S_q sliders visually in sync when one bumps the other
-        if (key === 'S' || key === 'S_q') {
-            d3.selectAll('#runtime-sliders input[type="range"]').each(function() {
-                const group = this.parentNode;
-                const label = d3.select(group).select('.dim-name').text();
-                if (key === 'S' && label.includes('S_q')) {
-                    d3.select(this).property('value', valToSlider(params.S_q));
-                    d3.select(group).select('input[type="number"]').property('value', params.S_q);
-                } else if (key === 'S_q' && label.includes('S (')) {
-                    d3.select(this).property('value', valToSlider(params.S));
-                    d3.select(group).select('input[type="number"]').property('value', params.S);
-                }
-            });
-        }
+        // When B changes, the per-request sliders need rebuilding
+        // (S/S_q sync for B=1 is handled in buildPerRequestSlider's applyValue)
     }
 
     rangeInput.on('input', function() {
@@ -323,13 +319,25 @@ function buildSlider(container, key) {
     });
 }
 
+// Rebuild only the S/S_q slider area (below the B slider) without touching B itself
+function rebuildSeqSliders() {
+    const rtContainer = d3.select('#runtime-sliders');
+    rtContainer.selectAll('.seq-slider-area').remove();
+    const area = rtContainer.append('div').attr('class', 'seq-slider-area');
+    buildSeqLengthInputs(area);
+}
+
 function buildSliders() {
-    // Runtime sliders (B, S) — always visible, variant-independent
+    // Runtime sliders — always visible, variant-independent
     const rtContainer = d3.select('#runtime-sliders');
     rtContainer.selectAll('*').remove();
-    for (const key of RUNTIME_SLIDERS) {
-        buildSlider(rtContainer, key);
-    }
+
+    // B slider always shown
+    buildSlider(rtContainer, 'B');
+
+    // S/S_q area — always use compact per-request sliders
+    const area = rtContainer.append('div').attr('class', 'seq-slider-area');
+    buildSeqLengthInputs(area);
 
     // Model architecture sliders (variant-specific)
     const dimContainer = d3.select('#sliders');
@@ -345,157 +353,184 @@ function buildSliders() {
     if (params.pagedAttn) {
         pagedContainer.append('div').attr('class', 'slider-section-label').text('Paged Attention');
         buildSlider(pagedContainer, 'block_size');
-        buildSeqLengthInputs();
     }
+
+    // Hide old seq-lengths container (no longer used)
+    d3.select('#seq-lengths').classed('visible', false);
 
     updateDerived();
 }
 
-function buildSeqLengthInputs() {
-    const container = d3.select('#seq-lengths');
-    container.selectAll('*').remove();
-    container.classed('visible', true);
-
-    container.append('div').style('font-size', '10px').style('color', '#666')
-        .style('margin-bottom', '4px').text('Per-request sequence lengths:');
-
+function buildSeqLengthInputs(container) {
     // Ensure arrays match B
     while (params.seqLens.length < params.B) params.seqLens.push(params.S);
     while (params.seqLens.length > params.B) params.seqLens.pop();
     while (params.queryLens.length < params.B) params.queryLens.push(params.S_q || 1);
     while (params.queryLens.length > params.B) params.queryLens.pop();
-    // Enforce S_q <= S for all entries
     for (let i = 0; i < params.B; i++) {
         if (params.queryLens[i] > params.seqLens[i]) {
             params.seqLens[i] = params.queryLens[i];
         }
     }
 
-    // Header row
-    const header = container.append('div').attr('class', 'seq-row')
-        .style('color', '#666').style('font-size', '9px');
-    header.append('span').style('width', '42px').text('');
-    header.append('span').style('width', '50px').style('text-align', 'center').text('S');
-    header.append('span').style('width', '50px').style('text-align', 'center').text('S_q');
-    header.append('span').style('font-style', 'italic').text('Type');
-
     for (let i = 0; i < params.B; i++) {
-        const row = container.append('div').attr('class', 'seq-row');
-        row.append('span').style('width', '42px').text(`Req ${i}:`);
+        const reqLabel = container.append('div').attr('class', 'slider-section-label')
+            .style('margin-top', '4px').style('margin-bottom', '0').style('padding-top', '4px')
+            .text(`Req ${i}`);
+        const typeLabel = reqLabel.append('span')
+            .style('margin-left', '6px').style('font-weight', '400');
+        updateReqTypeLabel(i, typeLabel);
 
-        // S (total KV length per request)
-        const sInp = row.append('input')
-            .attr('type', 'number')
-            .attr('min', 1)
-            .attr('step', 1)
-            .property('value', params.seqLens[i]);
-
-        // S_q (new query tokens per request)
-        const qInp = row.append('input')
-            .attr('type', 'number')
-            .attr('min', 1)
-            .attr('step', 1)
-            .property('value', params.queryLens[i]);
-
-        sInp.on('input', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) return;
-            v = Math.max(1, v);
-            params.seqLens[i] = v;
-            if (params.queryLens[i] > v) {
-                params.queryLens[i] = v;
-                qInp.property('value', v);
-            }
-            updateTypeLabel();
-            updateDerived();
-        });
-        sInp.on('change', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) v = 1;
-            v = Math.max(1, v);
-            params.seqLens[i] = v;
-            if (params.queryLens[i] > v) {
-                params.queryLens[i] = v;
-                qInp.property('value', v);
-            }
-            this.value = v;
-            updateTypeLabel();
-            updateDerived();
-            update();
-        });
-
-        qInp.on('input', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) return;
-            v = Math.max(1, v);
-            if (v > params.seqLens[i]) {
-                params.seqLens[i] = v;
-                sInp.property('value', v);
-            }
-            params.queryLens[i] = v;
-            updateTypeLabel();
-            updateDerived();
-        });
-        qInp.on('change', function() {
-            let v = parseInt(this.value, 10);
-            if (isNaN(v)) v = 1;
-            v = Math.max(1, v);
-            if (v > params.seqLens[i]) {
-                params.seqLens[i] = v;
-                sInp.property('value', v);
-            }
-            params.queryLens[i] = v;
-            this.value = v;
-            updateTypeLabel();
-            updateDerived();
-            update();
-        });
-
-        // Type label (auto-detect prefill vs decode)
-        const typeLabel = row.append('span')
-            .style('font-size', '9px');
-
-        function updateTypeLabel() {
-            const sq = params.queryLens[i];
-            const s = params.seqLens[i];
-            const type = sq === 1 ? 'decode' : sq >= s ? 'prefill' : 'extend';
-            const color = sq === 1 ? '#3498db' : sq >= s ? '#f39c12' : '#2ecc71';
-            typeLabel.style('color', color).text(type);
-        }
-        updateTypeLabel();
+        buildPerRequestSlider(container, i, 'S', params.seqLens, typeLabel);
+        buildPerRequestSlider(container, i, 'S_q', params.queryLens, typeLabel);
     }
 }
 
-function updateDerived() {
-    const D = params.n_h * params.d_h;
-    let html = `<div class="derived-dim">D = n_h × d_h = <span>${D}</span></div>`;
+function updateReqTypeLabel(i, typeLabel) {
+    const sq = params.queryLens[i];
+    const s = params.seqLens[i];
+    const type = sq === 1 ? 'decode' : sq >= s ? 'prefill' : sq < 16 ? 'spec decode' : 'extend';
+    const color = sq === 1 ? '#3498db' : sq >= s ? '#f39c12' : sq < 16 ? '#8e44ad' : '#2ecc71';
+    typeLabel.style('color', color).text(type);
+}
 
+function buildPerRequestSlider(container, reqIdx, dimKey, arr, typeLabel) {
+    const def = SLIDER_DEFS[dimKey];
+    const row = container.append('div').attr('class', 'slider-group')
+        .attr('data-req', reqIdx).attr('data-dim', dimKey)
+        .style('display', 'flex').style('align-items', 'center')
+        .style('gap', '6px').style('margin-bottom', '2px');
+
+    row.append('span').attr('class', 'dim-name')
+        .style('width', '20px').style('flex-shrink', '0')
+        .style('font-size', '11px').style('text-align', 'right')
+        .text(dimKey === 'S_q' ? 'S_q' : 'S');
+
+    const LOG_STEPS = 1000;
+    const effectiveMax = def.max;
+    function valToSlider(v) {
+        const minV = Math.max(1, def.min);
+        return Math.round(LOG_STEPS * Math.log(v / minV) / Math.log(effectiveMax / minV));
+    }
+    function sliderToVal(s) {
+        const minV = Math.max(1, def.min);
+        return Math.round(minV * Math.pow(effectiveMax / minV, s / LOG_STEPS));
+    }
+
+    const rangeInput = row.append('input')
+        .attr('type', 'range')
+        .attr('min', 0).attr('max', LOG_STEPS).attr('step', 1)
+        .property('value', valToSlider(arr[reqIdx]))
+        .style('flex', '1');
+
+    const numInput = row.append('input')
+        .attr('class', 'dim-input')
+        .attr('type', 'number')
+        .attr('min', def.min).attr('max', effectiveMax)
+        .attr('step', def.step)
+        .property('value', arr[reqIdx]);
+
+    function syncPairedSlider() {
+        // Find and update the paired slider's DOM elements
+        const pairedDim = dimKey === 'S_q' ? 'S' : 'S_q';
+        const pairedVal = dimKey === 'S_q' ? params.seqLens[reqIdx] : params.queryLens[reqIdx];
+        const paired = container.select(`[data-req="${reqIdx}"][data-dim="${pairedDim}"]`);
+        if (!paired.empty()) {
+            paired.select('input[type="range"]').property('value', valToSlider(pairedVal));
+            paired.select('input[type="number"]').property('value', pairedVal);
+        }
+    }
+
+    function applyValue(v) {
+        arr[reqIdx] = v;
+        // When B=1, keep global S/S_q in sync with the per-request values
+        if (params.B === 1) {
+            if (dimKey === 'S') params.S = v;
+            if (dimKey === 'S_q') params.S_q = v;
+        }
+        if (dimKey === 'S_q' && params.queryLens[reqIdx] > params.seqLens[reqIdx]) {
+            params.seqLens[reqIdx] = params.queryLens[reqIdx];
+            if (params.B === 1) params.S = params.seqLens[reqIdx];
+            syncPairedSlider();
+        }
+        if (dimKey === 'S' && params.queryLens[reqIdx] > params.seqLens[reqIdx]) {
+            params.queryLens[reqIdx] = params.seqLens[reqIdx];
+            if (params.B === 1) params.S_q = params.queryLens[reqIdx];
+            syncPairedSlider();
+        }
+        numInput.property('value', arr[reqIdx]);
+        rangeInput.property('value', valToSlider(arr[reqIdx]));
+        updateReqTypeLabel(reqIdx, typeLabel);
+        updateDerived();
+        update();
+    }
+
+    rangeInput.on('input', function() {
+        applyValue(sliderToVal(+this.value));
+    });
+    numInput.on('change', function() {
+        let v = +this.value || def.min;
+        v = Math.max(def.min, Math.min(effectiveMax, v));
+        this.value = v;
+        applyValue(v);
+    });
+}
+
+function updateDerived() {
+    // Sync seqLens/queryLens arrays with B
+    while (params.seqLens.length < params.B) params.seqLens.push(params.S);
+    while (params.seqLens.length > params.B) params.seqLens.pop();
+    while (params.queryLens.length < params.B) params.queryLens.push(params.S_q || 1);
+    while (params.queryLens.length > params.B) params.queryLens.pop();
+    // When B=1, keep synced to global S/S_q sliders
+    if (params.B === 1) {
+        params.seqLens[0] = params.S;
+        params.queryLens[0] = params.S_q;
+    }
+    // Enforce S_q <= S per request
+    for (let i = 0; i < params.B; i++) {
+        if (params.queryLens[i] > params.seqLens[i]) {
+            params.seqLens[i] = params.queryLens[i];
+        }
+    }
+    // Compute totals across all requests
+    params.sumSq = params.queryLens.slice(0, params.B).reduce((a, b) => a + b, 0);
+    params.sumS = params.seqLens.slice(0, params.B).reduce((a, b) => a + b, 0);
+
+    // Model architecture derived values
+    const D = params.n_h * params.d_h;
+    let archHtml = `<div class="derived-dim">D = n_h × d_h = <span>${D}</span></div>`;
     if (currentVariant === 'mla') {
         const dr = params.d_r || 64;
         const totalCache = params.d_c + dr;
         const ratio = (2 * params.n_h * params.d_h / totalCache).toFixed(1);
-        html += `<div class="derived-dim">Cache per token: <span>d_c + d_r = ${totalCache}</span></div>`;
-        html += `<div class="derived-dim">KV cache reduction: <span>${ratio}×</span></div>`;
+        archHtml += `<div class="derived-dim">Cache per token: <span>d_c + d_r = ${totalCache}</span></div>`;
+        archHtml += `<div class="derived-dim">KV cache reduction: <span>${ratio}×</span></div>`;
     }
     if (currentVariant === 'gqa') {
         const gpc = Math.floor(params.n_h / params.n_kv);
         const ratio = (params.n_h / params.n_kv).toFixed(1);
-        html += `<div class="derived-dim">Heads per group: <span>${gpc}</span> (${ratio}× reduction)</div>`;
+        archHtml += `<div class="derived-dim">Heads per group: <span>${gpc}</span> (${ratio}× reduction)</div>`;
     }
     if (params.tp_size > 1) {
         const headsPerRank = Math.floor(params.n_h / params.tp_size);
-        html += `<div class="derived-dim">Heads per rank: <span>${headsPerRank}</span></div>`;
+        archHtml += `<div class="derived-dim">Heads per rank: <span>${headsPerRank}</span></div>`;
+    }
+    d3.select('#derived').html(archHtml);
+
+    // Runtime derived values
+    let rtHtml = '';
+    if (params.B > 1) {
+        rtHtml += `<div class="derived-dim">\u03a3S_q = <span>${params.sumSq}</span> (\u03a3S = ${params.sumS})</div>`;
     }
     if (params.pagedAttn) {
         const sLens = params.seqLens.slice(0, params.B);
         const blocksPerSeq = sLens.map(s => Math.ceil(s / params.block_size));
         const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
-        html += `<div class="derived-dim">S per req: <span>[${sLens.join(', ')}]</span></div>`;
-        html += `<div class="derived-dim">Blocks per req: <span>[${blocksPerSeq.join(', ')}]</span></div>`;
-        html += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
+        rtHtml += `<div class="derived-dim">Blocks per req: <span>[${blocksPerSeq.join(', ')}]</span></div>`;
+        rtHtml += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
     }
-
-    d3.select('#derived').html(html);
+    d3.select('#derived-runtime').html(rtHtml);
 }
 
 // --- Pipeline stats overlay ---
@@ -777,6 +812,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
 // --- Update ---
 
 function annotateGraph(graph) {
+    if (params.B > 1) addMultiRequestAnnotations(graph, params);
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
     if (params.flashAttn) addFlashAttnAnnotations(graph, params);
@@ -1002,38 +1038,86 @@ function addFlashAttnAnnotations(graph, params) {
     }
 }
 
+// --- Multi-request annotations (B > 1) ---
+
+function addMultiRequestAnnotations(graph, params) {
+    const sLens = [...params.seqLens].slice(0, params.B);
+    const sqLens = [...params.queryLens].slice(0, params.B);
+    const sumS = sLens.reduce((a, b) => a + b, 0);
+    const sumSq = sqLens.reduce((a, b) => a + b, 0);
+
+    for (const t of graph.tensors) {
+        // Mark mask as multi-request block-diagonal
+        if (t.type === 'mask') {
+            t.multiRequest = true;
+            t.seqLens = sLens;
+            t.queryLens = sqLens;
+        }
+
+        // Add request boundary lines to activation tensors with S_q or S dims
+        if (t.type === 'weight' || t.type === 'mask') continue;
+        const dims = t.dimNames || [];
+        const hasSq = dims.some(d => d === 'S_q' || d === '\u03a3S_q');
+        const hasS  = dims.some(d => d === 'S' || d === '\u03a3S');
+        if (hasSq) {
+            const boundaries = [];
+            let cum = 0;
+            for (let i = 0; i < sqLens.length - 1; i++) {
+                cum += sqLens[i];
+                boundaries.push(cum);
+            }
+            t.requestBoundaries = boundaries;
+            t.requestBoundaryTotal = sumSq;
+        } else if (hasS) {
+            const boundaries = [];
+            let cum = 0;
+            for (let i = 0; i < sLens.length - 1; i++) {
+                cum += sLens[i];
+                boundaries.push(cum);
+            }
+            t.requestBoundaries = boundaries;
+            t.requestBoundaryTotal = sumS;
+        }
+    }
+}
+
 // --- Paged attention annotations ---
 
 function addPagedAnnotations(graph, params) {
     const bs = params.block_size;
-    const sLens = [...params.seqLens].slice(0, params.B);   // S per request (total KV length)
-    const sqLens = [...params.queryLens].slice(0, params.B); // S_q per request (new query tokens)
+    const sLens = [...params.seqLens].slice(0, params.B);
     const blocksPerSeq = sLens.map(s => Math.ceil(s / bs));
     const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
 
-    for (const t of graph.tensors) {
-        if (t.type === 'mask') {
-            t.pagedMask = true;
-            t.seqLens = sLens;
-            t.queryLens = sqLens;
-            const totalS = sLens.reduce((a, b) => a + b, 0);
-            const totalSq = sqLens.reduce((a, b) => a + b, 0);
-            t.shape = [totalSq, totalS];
-            t.dimNames = ['\u03a3S_q', '\u03a3S'];
-            const reqDescs = sLens.map((s, i) => `req${i}: S_q=${sqLens[i]}, S=${s}`).join(', ');
-            t.desc = `Variable-length causal mask for paged attention. ${reqDescs}. Each request attends only within its own sequence (block-diagonal) and causally.`;
+    // Build map: cache tensor id → source tensor (the "new" tokens fed into the cache op)
+    const tensorMap = {};
+    for (const t of graph.tensors) tensorMap[t.id] = t;
+    const cacheSourceMap = {};
+    for (const op of graph.ops) {
+        if (op.type === 'cache' && op.inputs.length > 0) {
+            const src = tensorMap[op.inputs[0]];
+            if (src) cacheSourceMap[op.output] = src;
         }
+    }
+
+    for (const t of graph.tensors) {
         // Mark KV cache tensors with paged layout
-        // Tensors with cache: true are the actual KV cache entries
         if (t.cache) {
+            // Attach source tensor info for the detail view
+            const src = cacheSourceMap[t.id];
+            if (src) {
+                t.cacheSource = { label: src.label, shape: [...src.shape], dimNames: [...(src.dimNames || [])], color: src.color };
+            }
             t.badge = 'PAGED';
-            // Derive per-token dims from shape (remove B and S)
-            const perTokenDims = t.shape.length === 4
-                ? t.dimNames.slice(1, 2).concat(t.dimNames.slice(3))  // [n_h, d_h]
-                : t.dimNames.slice(2);  // [d_c] or [d_r]
-            const perTokenShape = t.shape.length === 4
-                ? [t.shape[1], t.shape[3]]
-                : t.shape.slice(2);
+            // Derive per-token dims from shape (skip the S dimension)
+            // 3D tensors like [n_h, S, d_h]: per-token = [n_h, d_h] (indices 0 and 2)
+            // 2D tensors like [S, d_c]: per-token = [d_c] (index 1)
+            const perTokenDims = t.shape.length === 3
+                ? [t.dimNames[0], t.dimNames[2]]
+                : t.dimNames.slice(1);
+            const perTokenShape = t.shape.length === 3
+                ? [t.shape[0], t.shape[2]]
+                : t.shape.slice(1);
             t.pagedBlockDims = perTokenDims;
             t.pagedBlockShape = perTokenShape;
             const layoutStr = `[num_blocks, block_size, ${perTokenDims.join(', ')}]`;

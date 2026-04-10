@@ -11,7 +11,7 @@ const CTA_COLORS = [
     '#e74c3c', '#3498db', '#2ecc71', '#f39c12',
     '#9b59b6', '#1abc9c', '#e67e22', '#c0392b',
     '#2980b9', '#27ae60', '#d35400', '#8e44ad',
-    '#16a085', '#f1c40f', '#7f8c8d', '#2c3e50',
+    '#16a085', '#f1c40f', '#e84393', '#00b894',
 ];
 
 export function drawFlashAttnDetail(svg, op, tensorMap, params) {
@@ -37,6 +37,7 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
 
     // Derive dimensions
     const shQ = Q.shape;
+    const n_h = shQ.length >= 3 ? shQ[0] : 1;
     const S_q = shQ.length >= 4 ? shQ[2] : shQ.length >= 3 ? shQ[1] : shQ[0];
     const d_q = shQ[shQ.length - 1];
     const shK = K.shape;
@@ -69,6 +70,9 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
         if (selectedKVBlock >= nKV) selectedKVBlock = nKV - 1;
 
         let sY = 10;
+        sY = drawPerHeadOverview(svg, pad, sY, w - 2 * pad, n_h, S_q, S, d_q, d_v, Q, K, V, outputTensor);
+
+        sY += 16;
         sY = drawCTAGrid(svg, pad, sY, w - 2 * pad, params, S_q, S, nQ, nKV,
             selectedQBlock, selectedKVBlock, (qi, kvi) => {
                 selectedQBlock = qi;
@@ -259,6 +263,223 @@ function buildHTMLSlider(container, label, params, key, min, max, step, onChange
     });
 }
 
+// --- Section 0: Per-Head Overview ---
+// Uses the same shared-hinge proportional matmul layout as Tensor Mapping,
+// but with depth-stacked layers showing n_h heads (front head highlighted).
+
+function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O) {
+    const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
+
+    sectionG.append('text')
+        .attr('x', 0).attr('y', 14)
+        .attr('fill', '#bbb').attr('font-size', '12px').attr('font-weight', '600')
+        .text('Per-Head Decomposition');
+
+    const sameKV = K.id === V.id;
+    const d_k = K.shape[K.shape.length - 1];
+
+    // Depth stacking params
+    const maxLayers = Math.min(n_h, 8);
+    const layerOff = 3; // px offset per layer (diagonal)
+    const stackW = maxLayers * layerOff;
+    const stackH = maxLayers * layerOff;
+
+    // --- Proportional shared-hinge layout (same as Tensor Mapping, scaled down) ---
+    //              K^T [d_k × S]      V [S × d_v]
+    //  Q [S_q×d_q]  S/P [S_q × S]    O [S_q × d_v]
+    const headerH = 28;
+    const topLabelH = 14;
+    const gapInner = 3;
+    const softmaxGap = 14;
+    const leftMargin = 40;
+    const minPx = 16;
+    const maxH = 160;
+    const pow = 0.4;
+
+    const rawSq = Math.pow(S_q, pow);
+    const rawS  = Math.pow(S, pow);
+    const rawDq = Math.pow(d_q, pow);
+    const rawDk = Math.pow(d_k, pow);
+    const rawDv = Math.pow(d_v, pow);
+
+    // Scale to fit, leaving room for stack depth
+    const kW = (width - leftMargin - gapInner - softmaxGap - stackW) / (rawDq + rawS + rawDv);
+    const kH = (maxH - topLabelH - gapInner - stackH) / (Math.max(rawDk, rawS) + rawSq);
+    const k = Math.min(kW, kH);
+
+    const pxDq = Math.max(minPx, rawDq * k);
+    const pxDk = Math.max(minPx, rawDk * k);
+    const pxS  = Math.max(minPx, rawS * k);
+    const pxSq = Math.max(minPx, rawSq * k);
+    const pxDv = Math.max(minPx, rawDv * k);
+
+    // Center horizontally
+    const totalW = leftMargin + pxDq + gapInner + pxS + softmaxGap + pxDv + stackW;
+    const offX = (width - totalW) / 2;
+
+    const col0X = offX + leftMargin;
+    const col1X = col0X + pxDq + gapInner;
+    const col2X = col1X + pxS + softmaxGap;
+
+    const topMaxH = Math.max(pxDk, pxS);
+    const resultY = headerH + topLabelH + topMaxH + gapInner + stackH;
+
+    // Tensor positions (front face — layer 0)
+    const blocks = [
+        { id: 'Q',  bx: col0X, by: resultY,                       bw: pxDq, bh: pxSq, color: '#e74c3c', label: Q.label },
+        { id: 'KT', bx: col1X, by: resultY - gapInner - pxDk,     bw: pxS,  bh: pxDk, color: '#2ecc71', label: K.label + '\u1d40' },
+        { id: 'SP', bx: col1X, by: resultY,                       bw: pxS,  bh: pxSq, color: '#9b59b6', label: 'S/P', dashed: true },
+        ...(!sameKV ? [{ id: 'V', bx: col2X, by: resultY - gapInner - pxS, bw: pxDv, bh: pxS, color: '#f39c12', label: V.label }] : []),
+        { id: 'O',  bx: col2X, by: resultY,                       bw: pxDv, bh: pxSq, color: '#3498db', label: 'O', sublabel: O.label !== 'O' ? O.label : null },
+    ];
+
+    // Draw each tensor as a depth stack
+    for (const blk of blocks) {
+        // Back layers (dimmed)
+        for (let li = maxLayers - 1; li >= 1; li--) {
+            const lx = blk.bx + li * layerOff;
+            const ly = blk.by - li * layerOff;
+            const rect = sectionG.append('rect')
+                .attr('x', lx).attr('y', ly)
+                .attr('width', blk.bw).attr('height', blk.bh)
+                .attr('fill', blk.color).attr('fill-opacity', 0.06 + (maxLayers - li) * 0.015)
+                .attr('stroke', blk.color).attr('stroke-opacity', 0.15)
+                .attr('stroke-width', 0.5).attr('rx', 2);
+            if (blk.dashed) rect.attr('stroke-dasharray', '4,2');
+        }
+
+        // Front layer (highlighted)
+        const rect = sectionG.append('rect')
+            .attr('x', blk.bx).attr('y', blk.by)
+            .attr('width', blk.bw).attr('height', blk.bh)
+            .attr('fill', blk.color).attr('fill-opacity', blk.dashed ? 0.12 : 0.25)
+            .attr('stroke', blk.color).attr('stroke-opacity', 0.7)
+            .attr('stroke-width', 1.5).attr('rx', 2);
+        if (blk.dashed) rect.attr('stroke-dasharray', '5,3');
+
+        // Label on front face
+        if (blk.bw >= 20 && blk.bh >= 14) {
+            const hasSubLabel = blk.sublabel && blk.bh >= 24;
+            const mainY = blk.by + blk.bh / 2 + (hasSubLabel ? -1 : 3);
+            sectionG.append('text')
+                .attr('x', blk.bx + blk.bw / 2).attr('y', mainY)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#fff').attr('font-size', Math.min(10, blk.bw / 4) + 'px')
+                .attr('font-weight', '600')
+                .text(blk.label);
+            if (hasSubLabel) {
+                sectionG.append('text')
+                    .attr('x', blk.bx + blk.bw / 2).attr('y', mainY + 10)
+                    .attr('text-anchor', 'middle')
+                    .attr('fill', '#aaa').attr('font-size', '7px')
+                    .text(`(${blk.sublabel})`);
+            }
+        }
+    }
+
+    // --- Tensor name labels above ---
+    const ktBlk = blocks.find(b => b.id === 'KT');
+    sectionG.append('text')
+        .attr('x', ktBlk.bx + ktBlk.bw / 2).attr('y', ktBlk.by - stackH - 4)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#2ecc71').attr('font-size', '9px').attr('font-weight', '600')
+        .text(K.label + '\u1d40');
+
+    const vBlk = blocks.find(b => b.id === 'V');
+    if (vBlk) {
+        sectionG.append('text')
+            .attr('x', vBlk.bx + vBlk.bw / 2).attr('y', vBlk.by - stackH - 4)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#f39c12').attr('font-size', '9px').attr('font-weight', '600')
+            .text(V.label);
+    }
+
+    const qBlk = blocks[0];
+    sectionG.append('text')
+        .attr('x', qBlk.bx - 4).attr('y', qBlk.by + qBlk.bh / 2 + 3)
+        .attr('text-anchor', 'end')
+        .attr('fill', '#e74c3c').attr('font-size', '9px').attr('font-weight', '600')
+        .text(Q.label);
+
+    // --- Dimension labels ---
+    sectionG.append('text')
+        .attr('x', qBlk.bx - 4).attr('y', qBlk.by + 8)
+        .attr('text-anchor', 'end')
+        .attr('fill', '#555').attr('font-size', '7px')
+        .text(`S_q=${S_q}`);
+    sectionG.append('text')
+        .attr('x', qBlk.bx + qBlk.bw / 2).attr('y', qBlk.by + qBlk.bh + 10)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#555').attr('font-size', '7px')
+        .text(`d=${d_q}`);
+    const spBlk = blocks.find(b => b.id === 'SP');
+    sectionG.append('text')
+        .attr('x', spBlk.bx + spBlk.bw / 2).attr('y', spBlk.by + spBlk.bh + 10)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#555').attr('font-size', '7px')
+        .text(`S=${S}`);
+
+    // --- Softmax arrow in the gap ---
+    const softX = spBlk.bx + spBlk.bw + softmaxGap / 2;
+    const softY = spBlk.by + spBlk.bh / 2;
+    sectionG.append('text')
+        .attr('x', softX).attr('y', softY)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#f39c12').attr('font-size', '7px').attr('font-weight', '600')
+        .attr('transform', `rotate(-90, ${softX}, ${softY})`)
+        .text('softmax \u2192');
+
+    // --- n_h bracket along the depth diagonal ---
+    const annoY = resultY + pxSq + 16;
+    if (n_h > 1) {
+        const rightBlk = blocks[blocks.length - 1];
+        // Back layer top-right corner
+        const backX = rightBlk.bx + rightBlk.bw + stackW;
+        const backY = rightBlk.by - stackH;
+        // Front layer top-right corner
+        const frontX = rightBlk.bx + rightBlk.bw;
+        const frontY = rightBlk.by;
+        // Bracket offset perpendicular to the diagonal (outward)
+        const dx = stackW, dy = -stackH;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        const px = -dy / len * 6; // perpendicular x (outward from tensor)
+        const py = dx / len * 6;  // perpendicular y
+        // Bracket line along the diagonal
+        sectionG.append('line')
+            .attr('x1', backX + px).attr('y1', backY + py)
+            .attr('x2', frontX + px).attr('y2', frontY + py)
+            .attr('stroke', '#888').attr('stroke-width', 1);
+        // End ticks (perpendicular to diagonal)
+        sectionG.append('line')
+            .attr('x1', backX + px).attr('y1', backY + py)
+            .attr('x2', backX + px * 0.5).attr('y2', backY + py * 0.5)
+            .attr('stroke', '#888').attr('stroke-width', 1);
+        sectionG.append('line')
+            .attr('x1', frontX + px).attr('y1', frontY + py)
+            .attr('x2', frontX + px * 0.5).attr('y2', frontY + py * 0.5)
+            .attr('stroke', '#888').attr('stroke-width', 1);
+        // Label
+        const midX = (backX + frontX) / 2 + px + 4;
+        const midY = (backY + frontY) / 2 + py + 3;
+        sectionG.append('text')
+            .attr('x', midX).attr('y', midY)
+            .attr('fill', '#aaa').attr('font-size', '8px')
+            .text(`n_h=${n_h}`);
+    }
+
+    // Bottom annotation
+    const headText = n_h > 1
+        ? `Showing 1 of ${n_h} heads \u2014 repeated independently for each head`
+        : 'Single head (n_h = 1)';
+    sectionG.append('text')
+        .attr('x', width / 2).attr('y', annoY)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#f39c12').attr('font-size', '10px').attr('font-style', 'italic')
+        .text(headText);
+
+    return y + annoY + 8;
+}
+
 // --- Section A: CTA Grid ---
 
 function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
@@ -316,25 +537,58 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
         }
     }
 
+    // Build cumulative offsets for multi-request block-diagonal masking
+    const B = params.B || 1;
+    const queryLens = params.queryLens ? params.queryLens.slice(0, B) : [S_q];
+    const seqLens = params.seqLens ? params.seqLens.slice(0, B) : [S];
+    const cumSq = [0];
+    const cumS = [0];
+    for (let r = 0; r < queryLens.length; r++) {
+        cumSq.push(cumSq[r] + queryLens[r]);
+        cumS.push(cumS[r] + seqLens[r]);
+    }
+
+    // Check if Q block [qStart, qEnd] has ANY valid attention to KV block [kvStart, kvEnd]
+    // under block-diagonal causal mask
+    function isCausallyReachable(qStart, qEnd, kvStart, kvEnd) {
+        for (let r = 0; r < queryLens.length; r++) {
+            const rqS = cumSq[r], rqE = cumSq[r + 1] - 1;
+            const rkS = cumS[r], rkE = cumS[r + 1] - 1;
+            // Q block must overlap this request's query range
+            if (qEnd < rqS || qStart > rqE) continue;
+            // KV block must overlap this request's key range
+            if (kvEnd < rkS || kvStart > rkE) continue;
+            // Causal check within this request
+            const maxQ = Math.min(qEnd, rqE);
+            const localQ = maxQ - rqS;
+            const kvOffset = seqLens[r] - queryLens[r];
+            const maxReachableK = rkS + kvOffset + localQ;
+            const minK = Math.max(kvStart, rkS);
+            if (minK <= maxReachableK) return true;
+        }
+        return false;
+    }
+
     // Draw grid cells
     for (let i = 0; i < numQBlocks; i++) {
-        // Check causal masking: Q block i covers rows [i*Br, (i+1)*Br-1]
-        // It attends to keys up to position (i+1)*Br - 1 + (S - S_q) (accounting for KV offset)
         const qStart = i * Br;
-        const kvOffset = S - S_q;  // cached tokens before current query
 
         for (let j = 0; j < numKVBlocks; j++) {
             const kvStart = j * Bc;
 
-            // Causal check: does this Q block have ANY attention to this KV block?
-            // Q row qStart attends to keys <= qStart + kvOffset
-            // KV block j starts at kvStart
-            // The Q block can attend to this KV block if kvStart <= (qStart + Br - 1) + kvOffset
-            const causallyReachable = kvStart <= (qStart + Br - 1) + kvOffset;
+            const causallyReachable = isCausallyReachable(
+                qStart, Math.min(qStart + Br - 1, S_q - 1),
+                kvStart, Math.min(kvStart + Bc - 1, S - 1)
+            );
 
             const isSelected = (i === selectedQ && j === selectedKV);
             const ctaId = splitKV ? (i * numKVBlocks + j) : i;
-            const color = CTA_COLORS[ctaId % CTA_COLORS.length];
+            // Use a coprime stride to avoid column aliasing when numKVBlocks
+            // is a multiple of the palette size (all columns same color).
+            const colorIdx = splitKV
+                ? (i * 7 + j * 3) % CTA_COLORS.length
+                : ctaId % CTA_COLORS.length;
+            const color = CTA_COLORS[colorIdx];
 
             const cell = sectionG.append('rect')
                 .attr('x', gridX + j * cellW + 0.5)
@@ -383,6 +637,26 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
                 .attr('x2', gridX + gridW - 6).attr('y2', arrowY)
                 .attr('stroke', '#555').attr('stroke-width', 0.5)
                 .attr('stroke-dasharray', '2,2')
+                .attr('pointer-events', 'none');
+        }
+    }
+
+    // Request boundary lines on the grid (when B > 1)
+    if (B > 1) {
+        for (let r = 1; r < B; r++) {
+            // Horizontal line at cumulative S_q boundary
+            const qBoundary = cumSq[r] / S_q * gridH;
+            sectionG.append('line')
+                .attr('x1', gridX).attr('y1', gridY + qBoundary)
+                .attr('x2', gridX + gridW).attr('y2', gridY + qBoundary)
+                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.5)
+                .attr('pointer-events', 'none');
+            // Vertical line at cumulative S boundary
+            const kvBoundary = cumS[r] / S * gridW;
+            sectionG.append('line')
+                .attr('x1', gridX + kvBoundary).attr('y1', gridY)
+                .attr('x2', gridX + kvBoundary).attr('y2', gridY + gridH)
+                .attr('stroke', '#e74c3c').attr('stroke-width', 1).attr('stroke-opacity', 0.5)
                 .attr('pointer-events', 'none');
         }
     }

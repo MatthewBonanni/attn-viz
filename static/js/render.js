@@ -130,9 +130,9 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
             .attr('stroke-width', 1);
 
-        // Depth face decorations: TP stripes and/or 4D grouping lines
-        if (shape.length === 4 && type !== 'weight' && type !== 'mask' && tensor.tpSharded && tensor.tpSize > 1) {
-            draw4DTpDepth(group, x, y, w, h, off, shape[0], shape[1], tensor.tpSize);
+        // Depth face decorations: TP stripes and/or grouping lines
+        if (shape.length === 3 && type !== 'weight' && type !== 'mask' && tensor.tpSharded && tensor.tpSize > 1) {
+            draw4DTpDepth(group, x, y, w, h, off, 1, shape[0], tensor.tpSize);
         } else if (tensor.tpSharded && tensor.tpSize > 1) {
             drawTpStripes(group, x + w, y, off, h, tensor.tpSize);
         }
@@ -140,7 +140,9 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
 
     // Front face
     if (type === 'mask') {
-        if (tensor.pagedMask && tensor.seqLens) {
+        if (tensor.multiRequest && tensor.seqLens) {
+            drawMultiRequestMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens);
+        } else if (tensor.pagedMask && tensor.seqLens) {
             drawPagedMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens);
         } else {
             drawMaskFace(group, x, y, w, h, shape, color);
@@ -163,6 +165,29 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             // Only stroke flat (2D) tensors — 3D faces define their own edges
             frontRect.attr('stroke', d3.color(color).darker(0.3))
                 .attr('stroke-width', 1);
+        }
+    }
+
+    // Request boundary lines (when B > 1)
+    if (tensor.requestBoundaries && tensor.requestBoundaries.length > 0) {
+        const totalH = tensor.requestBoundaryTotal || 1;
+        for (const cumOffset of tensor.requestBoundaries) {
+            const frac = cumOffset / totalH;
+            const ly = y + frac * h;
+            // Front face line
+            group.append('line')
+                .attr('x1', x).attr('y1', ly)
+                .attr('x2', x + w).attr('y2', ly)
+                .attr('stroke', '#e74c3c').attr('stroke-width', 0.75)
+                .attr('stroke-opacity', 0.5);
+            // Depth face line (if 3D)
+            if (d > 0) {
+                group.append('line')
+                    .attr('x1', x + w).attr('y1', ly)
+                    .attr('x2', x + w + off.dx).attr('y2', ly + off.dy)
+                    .attr('stroke', '#e74c3c').attr('stroke-width', 0.75)
+                    .attr('stroke-opacity', 0.35);
+            }
         }
     }
 
@@ -338,7 +363,79 @@ function drawMaskFace(group, x, y, w, h, shape, color) {
     }
 }
 
-// --- Paged/variable-length mask face ---
+// --- Multi-request mask face (B > 1, block-diagonal) ---
+
+function drawMultiRequestMaskFace(group, x, y, w, h, seqLens, queryLens) {
+    const sqLens = queryLens || seqLens;
+    const totalS = seqLens.reduce((a, b) => a + b, 0);
+    const totalSq = sqLens.reduce((a, b) => a + b, 0);
+    const color = '#1abc9c';
+    const blocked = '#2c3e50';
+    const crossSeq = '#1a1520';
+
+    // Always use schematic (triangle) approach for the small on-tensor face
+    // Background: cross-sequence (dark)
+    group.append('rect')
+        .attr('x', x).attr('y', y)
+        .attr('width', w).attr('height', h)
+        .attr('fill', crossSeq).attr('fill-opacity', 0.8);
+
+    // Draw each request's causal block on the diagonal
+    let rowOff = 0, colOff = 0;
+    for (let si = 0; si < sqLens.length; si++) {
+        const nq = sqLens[si], ns = seqLens[si];
+        const bx = x + (colOff / totalS) * w;
+        const by = y + (rowOff / totalSq) * h;
+        const bw = (ns / totalS) * w;
+        const bh = (nq / totalSq) * h;
+        const qOff = ns - nq;
+
+        // Masked-future region within this request's block
+        group.append('rect')
+            .attr('x', bx).attr('y', by)
+            .attr('width', bw).attr('height', bh)
+            .attr('fill', blocked).attr('fill-opacity', 0.5);
+
+        // Causal attend triangle/trapezoid
+        const diagX = bx + ((qOff + 1) / ns) * bw;
+        group.append('polygon')
+            .attr('points', polyStr([
+                [bx, by], [bx, by + bh], [bx + bw, by + bh], [diagX, by]
+            ]))
+            .attr('fill', color).attr('fill-opacity', 0.85);
+
+        // Diagonal line
+        group.append('line')
+            .attr('x1', diagX).attr('y1', by)
+            .attr('x2', bx + bw).attr('y2', by + bh)
+            .attr('stroke', '#fff').attr('stroke-width', 0.5).attr('stroke-opacity', 0.3);
+
+        rowOff += nq;
+        colOff += ns;
+    }
+
+    // Request boundary lines
+    let cumRow = 0;
+    for (let si = 0; si < sqLens.length - 1; si++) {
+        cumRow += sqLens[si];
+        const ly = y + (cumRow / totalSq) * h;
+        group.append('line')
+            .attr('x1', x).attr('y1', ly)
+            .attr('x2', x + w).attr('y2', ly)
+            .attr('stroke', '#e74c3c').attr('stroke-width', 0.75).attr('stroke-opacity', 0.5);
+    }
+    let cumCol = 0;
+    for (let sj = 0; sj < seqLens.length - 1; sj++) {
+        cumCol += seqLens[sj];
+        const lx = x + (cumCol / totalS) * w;
+        group.append('line')
+            .attr('x1', lx).attr('y1', y)
+            .attr('x2', lx).attr('y2', y + h)
+            .attr('stroke', '#e74c3c').attr('stroke-width', 0.75).attr('stroke-opacity', 0.5);
+    }
+}
+
+// --- Paged/variable-length mask face (preserved for future use) ---
 
 function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens) {
     const sqLens = queryLens || seqLens;
@@ -1126,49 +1223,62 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
         const dimNames = t.dimNames || [];
         const block = drawTensorBlock(g, t._layoutX, t._layoutY, t, dimNames);
 
-        // Highlight the "new" portion (last S_q rows) on KV cache tensors
-        if (t.cache && _params.S_q < _params.S) {
-            const seqIdx = (t.dimNames || []).indexOf('S');
+        // Highlight the "new" portion on KV cache tensors
+        if (t.cache) {
+            const seqIdx = (t.dimNames || []).findIndex(n => n === 'S' || n === '\u03a3S');
             if (seqIdx >= 0) {
-                const newFrac = _params.S_q / _params.S;
-                const nx = t._x;
-                const nh = t._h * newFrac;
-                const ny = t._y + t._h - nh;
+                const B = _params.B || 1;
+                const queryLens = _params.queryLens ? _params.queryLens.slice(0, B) : [_params.S_q];
+                const seqLens = _params.seqLens ? _params.seqLens.slice(0, B) : [_params.S];
+                const effS = _params.sumS || _params.S;
                 const off = t._off;
 
-                // Front face
-                block.append('rect')
-                    .attr('x', nx).attr('y', ny)
-                    .attr('width', t._w).attr('height', nh)
-                    .attr('fill', '#fff').attr('fill-opacity', 0.12)
-                    .attr('stroke', '#fff').attr('stroke-width', 1)
-                    .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.5)
-                    .attr('rx', 1)
-                    .attr('pointer-events', 'none');
+                // Draw per-request "new" highlight
+                let cumS = 0;
+                for (let ri = 0; ri < B; ri++) {
+                    const sq = queryLens[ri], s = seqLens[ri];
+                    if (sq >= s) { cumS += s; continue; } // prefill — all tokens are "new", skip highlight
+                    const newFrac = sq / effS;
+                    const reqEndFrac = (cumS + s) / effS;
+                    const nh = t._h * newFrac;
+                    const ny = t._y + t._h * reqEndFrac - nh;
+                    const nx = t._x;
 
-                // Right face (if 3D)
-                if (t._d > 0 && off) {
-                    block.append('polygon')
-                        .attr('points', polyStr([
-                            [nx + t._w, ny],
-                            [nx + t._w + off.dx, ny + off.dy],
-                            [nx + t._w + off.dx, ny + nh + off.dy],
-                            [nx + t._w, ny + nh],
-                        ]))
-                        .attr('fill', '#fff').attr('fill-opacity', 0.10)
+                    // Front face
+                    block.append('rect')
+                        .attr('x', nx).attr('y', ny)
+                        .attr('width', t._w).attr('height', nh)
+                        .attr('fill', '#fff').attr('fill-opacity', 0.12)
                         .attr('stroke', '#fff').attr('stroke-width', 1)
-                        .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.4)
+                        .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.5)
+                        .attr('rx', 1)
                         .attr('pointer-events', 'none');
-                }
 
-                if (nh >= 10) {
-                    block.append('text')
-                        .attr('x', nx + t._w / 2).attr('y', ny + nh / 2 + 3)
-                        .attr('text-anchor', 'middle')
-                        .attr('fill', '#fff').attr('fill-opacity', 0.6)
-                        .attr('font-size', '7px')
-                        .attr('pointer-events', 'none')
-                        .text('new');
+                    // Right face (if 3D)
+                    if (t._d > 0 && off) {
+                        block.append('polygon')
+                            .attr('points', polyStr([
+                                [nx + t._w, ny],
+                                [nx + t._w + off.dx, ny + off.dy],
+                                [nx + t._w + off.dx, ny + nh + off.dy],
+                                [nx + t._w, ny + nh],
+                            ]))
+                            .attr('fill', '#fff').attr('fill-opacity', 0.10)
+                            .attr('stroke', '#fff').attr('stroke-width', 1)
+                            .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.4)
+                            .attr('pointer-events', 'none');
+                    }
+
+                    if (nh >= 10) {
+                        block.append('text')
+                            .attr('x', nx + t._w / 2).attr('y', ny + nh / 2 + 3)
+                            .attr('text-anchor', 'middle')
+                            .attr('fill', '#fff').attr('fill-opacity', 0.6)
+                            .attr('font-size', '7px')
+                            .attr('pointer-events', 'none')
+                            .text('new');
+                    }
+                    cumS += s;
                 }
             }
         }

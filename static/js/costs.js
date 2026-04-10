@@ -158,24 +158,24 @@ export function computeOpCost(op, tensorMap) {
             const V = inputs.find(t => t && (t.id.startsWith('V') || t.id === 'c_KV'));
             if (!Q || !output) return null;
 
-            // Shapes: Q is [B, n_h, S_q, d], K is [B, n_h/1, S, d], V similar
+            // Shapes: Q is [n_h, S_q, d] (3D) or [S_q, d] (2D), K is [n_h, S, d] or [S, d]
             const shQ = Q.shape;
-            const B = shQ[0];
-            const n_h = shQ.length >= 3 ? shQ[1] : 1;
-            const S_q = shQ.length >= 4 ? shQ[2] : shQ.length >= 3 ? shQ[1] : shQ[0];
+            const n_h = shQ.length >= 3 ? shQ[0] : 1;
+            const S_q = shQ.length >= 3 ? shQ[1] : shQ[0];
             const d = shQ[shQ.length - 1];
 
             // K determines S and inner dim for QK^T
             const shK = K ? K.shape : shQ;
-            const S = shK.length >= 4 ? shK[2] : shK.length >= 3 ? shK[1] : shK[0];
+            const S = shK.length >= 3 ? shK[1] : shK[0];
             const d_k = shK[shK.length - 1];
 
             // V may be different tensor (or same as K for absorbed MLA)
             const actualV = (V && V.id !== K.id) ? V : K;
             const d_v = actualV.shape[actualV.shape.length - 1];
 
-            // FLOPs: 2*B*n_h*S_q*S*d_k (QK^T) + 5*B*n_h*S_q*S (mask+softmax) + 2*B*n_h*S_q*S*d_v (Attn@V)
-            const flops = B * n_h * S_q * S * (2 * d_k + 5 + 2 * d_v);
+            // FLOPs: 2*n_h*S_q*S*d_k (QK^T) + 5*n_h*S_q*S (mask+softmax) + 2*n_h*S_q*S*d_v (Attn@V)
+            // Note: S_q and S are sumSq/sumS when B > 1, so total work across all requests is captured
+            const flops = n_h * S_q * S * (2 * d_k + 5 + 2 * d_v);
 
             // Memory: read all non-mask inputs from HBM; write O to HBM
             const maskInput = inputs.find(t => t && t.type === 'mask');

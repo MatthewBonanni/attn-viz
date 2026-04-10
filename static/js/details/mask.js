@@ -86,6 +86,11 @@ function drawAxisLabels(g, rows, cols, cellSize, labelEvery, y0, rowOffset) {
 }
 
 export function drawMaskDetail(svg, _op, _tensorMap, params) {
+    // Multi-request: show block-diagonal mask (reuse tensor detail view)
+    if (params.B > 1) {
+        drawPagedMaskTensorDetail(svg, { type: 'mask' }, params);
+        return;
+    }
     const { w: svgW } = detailMetrics();
     const S = params.S;
     const S_q = params.S_q || S;
@@ -423,7 +428,7 @@ export function drawMaskTensorDetail(svg, _tensor, params) {
     svg.attr('height', descY + 30);
 }
 
-// --- Paged mask tensor detail (clicking the mask tensor when paged attention is on) ---
+// --- Multi-request block-diagonal mask detail ---
 
 export function drawPagedMaskTensorDetail(svg, _tensor, params) {
     const { w: svgW } = detailMetrics();
@@ -441,7 +446,7 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
 
     g.append('text').attr('class', 'tensor-label')
         .attr('x', gridW / 2).attr('y', -14)
-        .text('Variable-Length Causal Mask');
+        .text(`Block-Diagonal Causal Mask (B=${params.B})`);
 
     if (schematic) {
         // Background (cross-sequence blocked)
