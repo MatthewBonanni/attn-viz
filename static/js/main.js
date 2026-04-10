@@ -226,6 +226,10 @@ function buildSlider(container, key) {
 
         numInput.property('value', params[key]);
         rangeInput.property('value', params[key]);
+
+        // Extend seqLens/queryLens arrays BEFORE update() so addPagedAnnotations sees the right length
+        if ((key === 'B' || key === 'S') && params.pagedAttn) buildSeqLengthInputs();
+
         updateDerived();
         update();
 
@@ -252,7 +256,6 @@ function buildSlider(container, key) {
                 });
             }
         }
-        if ((key === 'B' || key === 'S') && params.pagedAttn) buildSeqLengthInputs();
     }
 
     rangeInput.on('input', function() { onSliderChange(this.value); });
