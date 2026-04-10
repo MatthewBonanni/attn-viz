@@ -12,17 +12,38 @@ import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRo
 
 // Track currently displayed detail for live refresh
 let _currentDetail = null;  // { type: 'op'|'tensor'|'group', id, graphId }
+let _currentWide = false;
+
+// Re-evaluate overlay visibility on resize when flash panel is open
+window.addEventListener('resize', () => {
+    if (_currentWide) _shiftStatsOverlay(true, true);
+});
 
 export function showDetail(op, graph, params) {
+    if (_currentDetail && _currentDetail.type === 'op' && _currentDetail.id === op.id) {
+        hideDetail();
+        return;
+    }
     _currentDetail = { type: 'op', id: op.id, graphId: graph.id };
     _renderOpDetail(op, graph, params);
 }
 
 function _shiftStatsOverlay(visible, wide) {
+    _currentWide = wide && visible;
     const overlay = d3.select('#stats-overlay');
+    const sidebarW = 280;
     if (wide) {
-        // Flash detail panel is wide enough to cover the overlay — hide it entirely
-        overlay.style('display', 'none');
+        // Check if the overlay would overlap the left sidebar
+        const overlayNode = overlay.node();
+        const overlayW = overlayNode ? overlayNode.offsetWidth || 220 : 220;
+        const overlayRight = 630 + 16; // panel width + margin
+        const overlayLeft = window.innerWidth - overlayRight - overlayW;
+        if (overlayLeft >= sidebarW + 8) {
+            overlay.style('display', null);
+            overlay.style('right', overlayRight + 'px');
+        } else {
+            overlay.style('display', 'none');
+        }
     } else {
         overlay.style('display', null);
         const offset = '536px';
@@ -114,6 +135,10 @@ function _renderOpDetail(op, graph, params) {
 }
 
 export function showTensorDetail(tensor, params) {
+    if (_currentDetail && _currentDetail.type === 'tensor' && _currentDetail.id === tensor.id) {
+        hideDetail();
+        return;
+    }
     _currentDetail = { type: 'tensor', id: tensor.id };
     _renderTensorDetail(tensor, params);
 }
@@ -155,6 +180,10 @@ function _renderTensorDetail(tensor, params) {
 }
 
 export function showGroupDetail(group) {
+    if (_currentDetail && _currentDetail.type === 'group' && _currentDetail.id === group.label) {
+        hideDetail();
+        return;
+    }
     _currentDetail = { type: 'group', id: group.label };
     _renderGroupDetail(group);
 }

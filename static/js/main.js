@@ -18,8 +18,8 @@ const VARIANTS = [
 
 const SLIDER_DEFS = {
     B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 2 },
-    S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 8, logScale: true },
-    S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 8, logScale: true },
+    S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
+    S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
     d_h:    { label: 'd_h (head dim)',    min: 1, max: 256,  step: 1,  default: 64 },
     n_kv:   { label: 'n_kv (KV heads)',   min: 1, max: 128,  step: 1,  default: 2 },
@@ -41,15 +41,15 @@ const VARIANT_SLIDERS = {
 // Model presets
 const PRESETS = [
     { name: 'Custom', variant: null },
-    { name: 'GPT-2 (124M)', variant: 'mha', B: 1, S: 12, S_q: 12, n_h: 12, d_h: 64 },
-    { name: 'GPT-2 XL (1.5B)', variant: 'mha', B: 1, S: 12, S_q: 12, n_h: 25, d_h: 64 },
-    { name: 'Llama 3.1 8B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 32, d_h: 128, n_kv: 8 },
-    { name: 'Llama 3.1 70B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 64, d_h: 128, n_kv: 8 },
-    { name: 'Llama 3.1 405B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 128, d_h: 128, n_kv: 8 },
-    { name: 'Mistral 7B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 32, d_h: 128, n_kv: 8 },
-    { name: 'Qwen 2.5 72B', variant: 'gqa', B: 1, S: 12, S_q: 12, n_h: 64, d_h: 128, n_kv: 8 },
-    { name: 'StarCoder (15B)', variant: 'mqa', B: 1, S: 12, S_q: 12, n_h: 48, d_h: 128 },
-    { name: 'DeepSeek R1', variant: 'mla', B: 1, S: 12, S_q: 12, n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
+    { name: 'GPT-2 (124M)', variant: 'mha', n_h: 12, d_h: 64 },
+    { name: 'GPT-2 XL (1.5B)', variant: 'mha', n_h: 25, d_h: 64 },
+    { name: 'Llama 3.1 8B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8 },
+    { name: 'Llama 3.1 70B', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
+    { name: 'Llama 3.1 405B', variant: 'gqa', n_h: 128, d_h: 128, n_kv: 8 },
+    { name: 'Mistral 7B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8 },
+    { name: 'Qwen 2.5 72B', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
+    { name: 'StarCoder (15B)', variant: 'mqa', n_h: 48, d_h: 128 },
+    { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
 ];
 
 // Default preset index per variant
@@ -115,6 +115,7 @@ function buildVariantTabs() {
             .classed('active', v.id === currentVariant)
             .text(v.label)
             .on('click', () => {
+                hideDetail();
                 currentVariant = v.id;
                 container.selectAll('button').classed('active', false);
                 container.select(`[data-variant="${v.id}"]`).classed('active', true);
@@ -130,7 +131,7 @@ function buildVariantTabs() {
                 updateVariantDesc();
                 buildSliders();
                 update();
-                setTimeout(fitToView, 50);
+                setTimeout(fitToView, 300);
             });
     }
 }
@@ -158,6 +159,7 @@ function buildPresets() {
         const preset = PRESETS[+this.value];
         if (!preset || !preset.variant) return;
 
+        hideDetail();
         currentVariant = preset.variant;
         for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
             if (preset[key] != null) params[key] = preset[key];
@@ -168,7 +170,7 @@ function buildPresets() {
         updateVariantDesc();
         buildSliders();
         update();
-        setTimeout(fitToView, 50);
+        setTimeout(fitToView, 300);
     });
 }
 

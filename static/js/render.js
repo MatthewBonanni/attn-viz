@@ -1123,6 +1123,53 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
         const dimNames = t.dimNames || [];
         const block = drawTensorBlock(g, t._layoutX, t._layoutY, t, dimNames);
 
+        // Highlight the "new" portion (last S_q rows) on KV cache tensors
+        if (t.cache && _params.S_q < _params.S) {
+            const seqIdx = (t.dimNames || []).indexOf('S');
+            if (seqIdx >= 0) {
+                const newFrac = _params.S_q / _params.S;
+                const nx = t._x;
+                const nh = t._h * newFrac;
+                const ny = t._y + t._h - nh;
+                const off = t._off;
+
+                // Front face
+                block.append('rect')
+                    .attr('x', nx).attr('y', ny)
+                    .attr('width', t._w).attr('height', nh)
+                    .attr('fill', '#fff').attr('fill-opacity', 0.12)
+                    .attr('stroke', '#fff').attr('stroke-width', 1)
+                    .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.5)
+                    .attr('rx', 1)
+                    .attr('pointer-events', 'none');
+
+                // Right face (if 3D)
+                if (t._d > 0 && off) {
+                    block.append('polygon')
+                        .attr('points', polyStr([
+                            [nx + t._w, ny],
+                            [nx + t._w + off.dx, ny + off.dy],
+                            [nx + t._w + off.dx, ny + nh + off.dy],
+                            [nx + t._w, ny + nh],
+                        ]))
+                        .attr('fill', '#fff').attr('fill-opacity', 0.10)
+                        .attr('stroke', '#fff').attr('stroke-width', 1)
+                        .attr('stroke-dasharray', '3,2').attr('stroke-opacity', 0.4)
+                        .attr('pointer-events', 'none');
+                }
+
+                if (nh >= 10) {
+                    block.append('text')
+                        .attr('x', nx + t._w / 2).attr('y', ny + nh / 2 + 3)
+                        .attr('text-anchor', 'middle')
+                        .attr('fill', '#fff').attr('fill-opacity', 0.6)
+                        .attr('font-size', '7px')
+                        .attr('pointer-events', 'none')
+                        .text('new');
+                }
+            }
+        }
+
         block.on('click', (event) => {
             event.stopPropagation();
             const scope = deselectScope || g;

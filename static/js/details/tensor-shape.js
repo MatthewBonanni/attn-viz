@@ -101,6 +101,59 @@ export function drawTensorShapeDetail(svg, tensor, params) {
                 .text(`${dimNames[0] || 'B'} \u00d7 ${dimNames[1] || 'n_h'} = ${depth}`);
         }
 
+        // KV cache "new" portion highlight (when S_q < S)
+        if (tensor.cache && params && params.S_q < params.S) {
+            const seqDimIdx = (dimNames || []).indexOf('S');
+            if (seqDimIdx >= 0) {
+                const newFrac = params.S_q / params.S;
+                const nh = h * newFrac;
+                const ny = y + h - nh;
+
+                // Front face
+                g.append('rect')
+                    .attr('x', x).attr('y', ny)
+                    .attr('width', w).attr('height', nh)
+                    .attr('fill', '#fff').attr('fill-opacity', 0.12)
+                    .attr('stroke', '#fff').attr('stroke-width', 1.5)
+                    .attr('stroke-dasharray', '4,2').attr('stroke-opacity', 0.5)
+                    .attr('rx', 1);
+
+                // Right face (if 3D)
+                if (d > 0) {
+                    const pts = [
+                        [x + w, ny],
+                        [x + w + dxTotal, ny + dyTotal],
+                        [x + w + dxTotal, ny + nh + dyTotal],
+                        [x + w, ny + nh],
+                    ].map(p => p.join(',')).join(' ');
+                    g.append('polygon')
+                        .attr('points', pts)
+                        .attr('fill', '#fff').attr('fill-opacity', 0.10)
+                        .attr('stroke', '#fff').attr('stroke-width', 1.5)
+                        .attr('stroke-dasharray', '4,2').attr('stroke-opacity', 0.4);
+                }
+
+                // Label + bracket
+                const labelSide = x + w + (d > 0 ? dxTotal : 0) + 8;
+                g.append('text').attr('class', 'dim-label')
+                    .attr('x', labelSide).attr('y', ny + nh / 2 + 3)
+                    .attr('text-anchor', 'start').attr('fill', '#aaa').attr('font-size', '9px')
+                    .text(`new (S_q=${params.S_q})`);
+                g.append('line')
+                    .attr('x1', labelSide - 3).attr('y1', ny)
+                    .attr('x2', labelSide - 3).attr('y2', ny + nh)
+                    .attr('stroke', '#888').attr('stroke-width', 1);
+                g.append('line')
+                    .attr('x1', labelSide - 3).attr('y1', ny)
+                    .attr('x2', labelSide - 6).attr('y2', ny)
+                    .attr('stroke', '#888').attr('stroke-width', 1);
+                g.append('line')
+                    .attr('x1', labelSide - 3).attr('y1', ny + nh)
+                    .attr('x2', labelSide - 6).attr('y2', ny + nh)
+                    .attr('stroke', '#888').attr('stroke-width', 1);
+            }
+        }
+
         let noteY = y + h + 40;
 
         // Batch braces and TP rank annotations for 4D + TP tensors
