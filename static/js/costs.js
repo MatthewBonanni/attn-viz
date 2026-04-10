@@ -37,7 +37,8 @@ export function computeOpCost(op, tensorMap) {
     if (!output) return null;
 
     const inputs = op.inputs.map(id => tensorMap[id]).filter(Boolean);
-    const outBytes = tensorBytes(output.shape);
+    // SRAM-only tensors (FlashAttention) have zero HBM transfer
+    const outBytes = output.sramOnly ? 0 : tensorBytes(output.shape);
 
     switch (op.type) {
         case 'matmul':
@@ -61,16 +62,17 @@ export function computeOpCost(op, tensorMap) {
             const batchSize = batchDims.reduce((a, b) => a * b, 1);
 
             const flops = 2 * batchSize * M * K * N;
-            const readA = tensorBytes(shA);
-            const readB = tensorBytes(shB);
+            const readA = A.sramOnly ? 0 : tensorBytes(shA);
+            const readB = B.sramOnly ? 0 : tensorBytes(shB);
             const readBytes = readA + readB;
             const writeBytes = outBytes;
 
+            const totalIO = readBytes + writeBytes;
             return {
                 flops,
                 readBytes,
                 writeBytes,
-                arithmeticIntensity: flops / (readBytes + writeBytes),
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
                 breakdown: [
                     { label: `Read ${A.label}`, shape: shA, bytes: readA },
                     { label: `Read ${B.label}`, shape: shB, bytes: readB },
@@ -84,16 +86,17 @@ export function computeOpCost(op, tensorMap) {
             const elements = tensorElements(output.shape);
             const flops = 5 * elements;
             // Read scores + mask, write attention weights
-            const scoreBytes = inputs[0] ? tensorBytes(inputs[0].shape) : 0;
-            const maskBytes = inputs[1] ? tensorElements(inputs[1].shape) * 1 : 0; // mask is boolean/int
+            const scoreBytes = (inputs[0] && !inputs[0].sramOnly) ? tensorBytes(inputs[0].shape) : 0;
+            const maskBytes = (inputs[1] && !inputs[1].sramOnly) ? tensorElements(inputs[1].shape) * 1 : 0;
             const readBytes = scoreBytes + maskBytes;
             const writeBytes = outBytes;
 
+            const totalIO = readBytes + writeBytes;
             return {
                 flops,
                 readBytes,
                 writeBytes,
-                arithmeticIntensity: flops / (readBytes + writeBytes),
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
                 breakdown: [
                     { label: `Read ${inputs[0]?.label || 'scores'}`, shape: inputs[0]?.shape, bytes: scoreBytes },
                     { label: `Read ${inputs[1]?.label || 'mask'}`, shape: inputs[1]?.shape, bytes: maskBytes },
@@ -107,14 +110,14 @@ export function computeOpCost(op, tensorMap) {
             // = 3 FLOPs per element (each pair covers 2 elements)
             const elements = tensorElements(output.shape);
             const flops = 3 * elements;
-            const readBytes = inputs[0] ? tensorBytes(inputs[0].shape) : 0;
+            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tensorBytes(inputs[0].shape) : 0;
             const writeBytes = outBytes;
 
             return {
                 flops,
                 readBytes,
                 writeBytes,
-                arithmeticIntensity: flops / (readBytes + writeBytes),
+                arithmeticIntensity: (readBytes + writeBytes) > 0 ? flops / (readBytes + writeBytes) : Infinity,
                 breakdown: [
                     { label: `Read ${inputs[0]?.label || 'input'}`, shape: inputs[0]?.shape, bytes: readBytes },
                     { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
@@ -125,16 +128,17 @@ export function computeOpCost(op, tensorMap) {
         case 'add': {
             const elements = tensorElements(output.shape);
             const flops = elements;
-            const readBytes = inputs.reduce((sum, t) => sum + tensorBytes(t.shape), 0);
+            const readBytes = inputs.reduce((sum, t) => sum + (t.sramOnly ? 0 : tensorBytes(t.shape)), 0);
             const writeBytes = outBytes;
+            const totalIO = readBytes + writeBytes;
 
             return {
                 flops,
                 readBytes,
                 writeBytes,
-                arithmeticIntensity: flops / (readBytes + writeBytes),
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
                 breakdown: [
-                    ...inputs.map(t => ({ label: `Read ${t.label}`, shape: t.shape, bytes: tensorBytes(t.shape) })),
+                    ...inputs.map(t => ({ label: `Read ${t.label}`, shape: t.shape, bytes: t.sramOnly ? 0 : tensorBytes(t.shape) })),
                     { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
                 ],
             };

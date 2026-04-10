@@ -67,6 +67,7 @@ for (const [k, v] of Object.entries(SLIDER_DEFS)) {
     params[k] = v.default;
 }
 params.pagedAttn = false;
+params.flashAttn = true;
 params.seqLens = [8, 9];     // per-request total S (cached + new)
 params.queryLens = [4, 1];   // per-request S_q (new query tokens)
 
@@ -180,6 +181,12 @@ function setupToggles() {
         update();
     });
 
+    // FlashAttention toggle
+    d3.select('#toggle-flash').on('click', function() {
+        params.flashAttn = !params.flashAttn;
+        d3.select(this).classed('active', params.flashAttn);
+        update();
+    });
 }
 
 // --- Sliders ---
@@ -495,58 +502,83 @@ function fmtTime(seconds) {
     return seconds.toFixed(3) + ' s';
 }
 
-// Compute the crossover S_q at which absorbed MLA becomes more memory-efficient,
-// for the current S. The key tradeoff: the upproj path pays S-proportional K/V
-// expansion costs independent of S_q, while absorbed pays higher fixed weight
-// overhead (W_QK). As S_q grows, the weight cost is amortized across more queries.
-// We sweep S_q at fixed S to find where the two paths cross.
+// Compute the crossover S_q between MHA-style and MQA-style MLA, for the current S.
+// MQA avoids K/V expansion (lower S_q-independent cost) but works in d_c space
+// (higher per-S_q cost since d_c >> d_h). So MQA wins at small S_q (decode) and
+// MHA wins at large S_q (prefill). We find where the two lines cross.
 function computeMlaCrossover(params) {
     const S = params.S || 1;
-    const p1 = { ...params, S, S_q: 1 };
-    const p2 = { ...params, S, S_q: Math.min(S, 201) };
-    const dSq = p2.S_q - p1.S_q;
-    if (dSq <= 0) return null;
+    // Evaluate at two S_q points to extract the linear relationship.
+    // Use S_q = 1 and S_q = max(2, min(S, 201)). When S=1, bump effective S
+    // to 2 so we have two valid sample points.
+    const effS = Math.max(S, 2);
+    const sqLo = 1;
+    const sqHi = Math.min(effS, 201);
+    const p1 = { ...params, S: effS, S_q: sqLo };
+    const p2 = { ...params, S: effS, S_q: sqHi };
+    const dSq = sqHi - sqLo;
 
-    const upproj1 = computePipelineTotals(mlaUpprojGraph(p1));
-    const upproj2 = computePipelineTotals(mlaUpprojGraph(p2));
-    const absorbed1 = computePipelineTotals(mlaAbsorbedGraph(p1));
-    const absorbed2 = computePipelineTotals(mlaAbsorbedGraph(p2));
+    const g_up1 = mlaUpprojGraph(p1);
+    const g_up2 = mlaUpprojGraph(p2);
+    const g_ab1 = mlaAbsorbedGraph(p1);
+    const g_ab2 = mlaAbsorbedGraph(p2);
+    // Apply FlashAttention annotations so SRAM-only tensors are zeroed in cost
+    if (params.flashAttn) {
+        addFlashAttnAnnotations(g_up1);
+        addFlashAttnAnnotations(g_up2);
+        addFlashAttnAnnotations(g_ab1);
+        addFlashAttnAnnotations(g_ab2);
+    }
+    const upproj1 = computePipelineTotals(g_up1);
+    const upproj2 = computePipelineTotals(g_up2);
+    const absorbed1 = computePipelineTotals(g_ab1);
+    const absorbed2 = computePipelineTotals(g_ab2);
 
     // Bytes as a function of S_q: total = slope * S_q + intercept
     const byteSlopeUpproj = (upproj2.totalBytes - upproj1.totalBytes) / dSq;
     const byteSlopeAbsorbed = (absorbed2.totalBytes - absorbed1.totalBytes) / dSq;
-    const byteInterceptUpproj = upproj1.totalBytes - byteSlopeUpproj;
-    const byteInterceptAbsorbed = absorbed1.totalBytes - byteSlopeAbsorbed;
+    const byteInterceptUpproj = upproj1.totalBytes - byteSlopeUpproj * sqLo;
+    const byteInterceptAbsorbed = absorbed1.totalBytes - byteSlopeAbsorbed * sqLo;
 
     // FLOPs as a function of S_q
     const flopSlopeUpproj = (upproj2.totalFlops - upproj1.totalFlops) / dSq;
     const flopSlopeAbsorbed = (absorbed2.totalFlops - absorbed1.totalFlops) / dSq;
-    const flopInterceptUpproj = upproj1.totalFlops - flopSlopeUpproj;
-    const flopInterceptAbsorbed = absorbed1.totalFlops - flopSlopeAbsorbed;
+    const flopInterceptUpproj = upproj1.totalFlops - flopSlopeUpproj * sqLo;
+    const flopInterceptAbsorbed = absorbed1.totalFlops - flopSlopeAbsorbed * sqLo;
 
-    // Crossover: where upproj bytes = absorbed bytes, solving for S_q
-    // (interceptAbsorbed - interceptUpproj) + (slopeAbsorbed - slopeUpproj) * S_q = 0
-    const interceptDiff = byteInterceptAbsorbed - byteInterceptUpproj;
-    const slopeDiff = byteSlopeUpproj - byteSlopeAbsorbed;
-
-    let crossoverSq = null;
-    if (slopeDiff > 0) {
-        const sq = Math.ceil(interceptDiff / slopeDiff);
-        if (sq > 0) crossoverSq = sq;
+    // Crossover: where upproj cost = absorbed cost, solving for S_q.
+    // diff(S_q) = (interceptAbsorbed - interceptUpproj) + (slopeAbsorbed - slopeUpproj) * S_q
+    // MQA wins when diff < 0. Crossover at diff = 0 → S_q = interceptDiff / slopeDiff
+    // where slopeDiff = slopeUpproj - slopeAbsorbed.
+    // slopeDiff > 0: MQA slope lower → MQA wins above crossover (unusual)
+    // slopeDiff < 0: MQA slope higher → MQA wins below crossover (typical: decode)
+    function findCrossover(interceptUp, interceptAbs, slopeUp, slopeAbs) {
+        const iDiff = interceptAbs - interceptUp;
+        const sDiff = slopeUp - slopeAbs;
+        if (Math.abs(sDiff) < 1e-6) return null; // parallel lines
+        const sq = iDiff / sDiff;
+        if (sq < 1) return null; // crossover below S_q=1, one always wins
+        return { sq: Math.round(sq), mqaWinsBelow: sDiff < 0 };
     }
 
-    // FLOPs crossover
-    const flopInterceptDiff = flopInterceptAbsorbed - flopInterceptUpproj;
-    const flopSlopeDiff = flopSlopeUpproj - flopSlopeAbsorbed;
-    let crossoverSqFlops = null;
-    if (flopSlopeDiff > 0) {
-        const sq = Math.ceil(flopInterceptDiff / flopSlopeDiff);
-        if (sq > 0) crossoverSqFlops = sq;
+    const bytesCrossover = findCrossover(byteInterceptUpproj, byteInterceptAbsorbed,
+        byteSlopeUpproj, byteSlopeAbsorbed);
+    const flopsCrossover = findCrossover(flopInterceptUpproj, flopInterceptAbsorbed,
+        flopSlopeUpproj, flopSlopeAbsorbed);
+
+    // Determine which always wins when there's no crossover
+    function alwaysWinner(interceptUp, interceptAbs, slopeUp, slopeAbs) {
+        // Check at S_q=1: whichever is lower there wins everywhere
+        return (interceptAbs + slopeAbs) < (interceptUp + slopeUp) ? 'mqa' : 'mha';
     }
 
     return {
-        crossoverSq,
-        crossoverSqFlops,
+        bytesCrossover,
+        flopsCrossover,
+        bytesAlwaysWinner: !bytesCrossover ? alwaysWinner(byteInterceptUpproj, byteInterceptAbsorbed,
+            byteSlopeUpproj, byteSlopeAbsorbed) : null,
+        flopsAlwaysWinner: !flopsCrossover ? alwaysWinner(flopInterceptUpproj, flopInterceptAbsorbed,
+            flopSlopeUpproj, flopSlopeAbsorbed) : null,
         S,
         // per-query-token costs (slope vs S_q)
         bytesPerQueryUpproj: byteSlopeUpproj,
@@ -649,10 +681,6 @@ function updateStatsOverlay(graphs, labels, crossover) {
             .style('border-top', '1px solid #2a2d3a')
             .style('margin', '8px 0');
 
-        const totals0 = computePipelineTotals(graphs[0]);
-        const totals1 = computePipelineTotals(graphs[1]);
-        const absorbedCheaper = totals1.totalBytes < totals0.totalBytes;
-
         const heading = container.append('div')
             .style('font-weight', '600')
             .style('color', '#bbb')
@@ -714,38 +742,30 @@ function updateStatsOverlay(graphs, labels, crossover) {
         addRow('m (FLOPs)', crossover.flopsPerQueryUpproj, crossover.flopsPerQueryAbsorbed,
             { fmt: v => fmtNum(v) + '/q', highlight: true });
 
-        // Crossover result
-        const result = container.append('div')
-            .style('font-size', '11px')
-            .style('color', '#999')
-            .style('line-height', '1.4')
-            .style('margin-top', '6px');
-
+        // Crossover results
         const atS = `at S=${crossover.S}, `;
 
-        // Transfer crossover
-        if (absorbedCheaper) {
-            result.html(`Xfer: ${atS}<span style="color:#2ecc71">MQA-style wins</span> at current S_q`);
-        } else if (crossover.crossoverSq != null) {
-            result.html(`Xfer: ${atS}absorbed wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${crossover.crossoverSq}</span>`);
-        } else {
-            result.html(`Xfer: ${atS}<span style="color:#e74c3c">MHA-style wins</span> at all S_q`);
+        function crossoverLine(label, xover, alwaysWinner) {
+            const line = container.append('div')
+                .style('font-size', '11px')
+                .style('color', '#999')
+                .style('line-height', '1.4')
+                .style('margin-top', label === 'Xfer' ? '6px' : '0');
+            if (xover) {
+                if (xover.mqaWinsBelow) {
+                    line.html(`${label}: ${atS}MQA wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2264 ${xover.sq}</span>`);
+                } else {
+                    line.html(`${label}: ${atS}MQA wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${xover.sq}</span>`);
+                }
+            } else {
+                const winner = alwaysWinner === 'mqa' ? 'MQA' : 'MHA';
+                const color = alwaysWinner === 'mqa' ? '#2ecc71' : '#e74c3c';
+                line.html(`${label}: ${atS}<span style="color:${color}">${winner} always wins</span>`);
+            }
         }
 
-        // Compute crossover
-        const totalsFlopsAbsorbedCheaper = totals1.totalFlops < totals0.totalFlops;
-        const compResult = container.append('div')
-            .style('font-size', '11px')
-            .style('color', '#999')
-            .style('line-height', '1.4');
-
-        if (totalsFlopsAbsorbedCheaper) {
-            compResult.html(`FLOPs: ${atS}<span style="color:#2ecc71">MQA-style wins</span> at current S_q`);
-        } else if (crossover.crossoverSqFlops != null) {
-            compResult.html(`FLOPs: ${atS}absorbed wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${crossover.crossoverSqFlops}</span>`);
-        } else {
-            compResult.html(`FLOPs: ${atS}<span style="color:#e74c3c">MHA-style wins</span> at all S_q`);
-        }
+        crossoverLine('Xfer', crossover.bytesCrossover, crossover.bytesAlwaysWinner);
+        crossoverLine('FLOPs', crossover.flopsCrossover, crossover.flopsAlwaysWinner);
     }
 }
 
@@ -754,6 +774,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
 function annotateGraph(graph) {
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
+    if (params.flashAttn) addFlashAttnAnnotations(graph);
 }
 
 function update() {
@@ -871,6 +892,21 @@ function addTpAnnotations(graph, params) {
         outProjOp.desc += ` With TP=${tp}, each rank computes a partial output. An all-reduce (sum) combines results across ${tp} ranks.`;
         outProjOp.tpAllReduce = true;
         outProjOp.tpSize = tp;
+    }
+}
+
+// --- FlashAttention annotations ---
+
+// Intermediate tensors that stay in SRAM (never materialized in HBM)
+const FLASH_SRAM_TENSORS = new Set(['scores', 'attn', 's_content', 's_rope']);
+
+function addFlashAttnAnnotations(graph) {
+    for (const t of graph.tensors) {
+        if (FLASH_SRAM_TENSORS.has(t.id)) {
+            t.sramOnly = true;
+            t.badge = 'SRAM';
+            t.desc = (t.desc || '') + ' [FlashAttention: not materialized in HBM — computed and consumed in SRAM tiles.]';
+        }
     }
 }
 

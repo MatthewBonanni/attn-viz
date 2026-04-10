@@ -151,7 +151,8 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             .attr('width', bw).attr('height', 14)
             .attr('fill', tensor.badge === 'ABSORBED' ? '#3b5bdb' :
                           tensor.badge === 'LATENT' ? '#9b59b6' :
-                          tensor.badge === 'PAGED' ? '#16a085' : '#e67e22');
+                          tensor.badge === 'PAGED' ? '#16a085' :
+                          tensor.badge === 'SRAM' ? '#555' : '#e67e22');
         group.append('text')
             .attr('class', 'badge')
             .attr('x', x + w / 2)
