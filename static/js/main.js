@@ -482,7 +482,73 @@ function fmtTime(seconds) {
     return seconds.toFixed(3) + ' s';
 }
 
-function updateStatsOverlay(graphs, labels) {
+// Compute the crossover S_q at which absorbed MLA becomes more memory-efficient,
+// for the current S. The key tradeoff: the upproj path pays S-proportional K/V
+// expansion costs independent of S_q, while absorbed pays higher fixed weight
+// overhead (W_QK). As S_q grows, the weight cost is amortized across more queries.
+// We sweep S_q at fixed S to find where the two paths cross.
+function computeMlaCrossover(params) {
+    const S = params.S || 1;
+    const p1 = { ...params, S, S_q: 1 };
+    const p2 = { ...params, S, S_q: Math.min(S, 201) };
+    const dSq = p2.S_q - p1.S_q;
+    if (dSq <= 0) return null;
+
+    const upproj1 = computePipelineTotals(mlaUpprojGraph(p1));
+    const upproj2 = computePipelineTotals(mlaUpprojGraph(p2));
+    const absorbed1 = computePipelineTotals(mlaAbsorbedGraph(p1));
+    const absorbed2 = computePipelineTotals(mlaAbsorbedGraph(p2));
+
+    // Bytes as a function of S_q: total = slope * S_q + intercept
+    const byteSlopeUpproj = (upproj2.totalBytes - upproj1.totalBytes) / dSq;
+    const byteSlopeAbsorbed = (absorbed2.totalBytes - absorbed1.totalBytes) / dSq;
+    const byteInterceptUpproj = upproj1.totalBytes - byteSlopeUpproj;
+    const byteInterceptAbsorbed = absorbed1.totalBytes - byteSlopeAbsorbed;
+
+    // FLOPs as a function of S_q
+    const flopSlopeUpproj = (upproj2.totalFlops - upproj1.totalFlops) / dSq;
+    const flopSlopeAbsorbed = (absorbed2.totalFlops - absorbed1.totalFlops) / dSq;
+    const flopInterceptUpproj = upproj1.totalFlops - flopSlopeUpproj;
+    const flopInterceptAbsorbed = absorbed1.totalFlops - flopSlopeAbsorbed;
+
+    // Crossover: where upproj bytes = absorbed bytes, solving for S_q
+    // (interceptAbsorbed - interceptUpproj) + (slopeAbsorbed - slopeUpproj) * S_q = 0
+    const interceptDiff = byteInterceptAbsorbed - byteInterceptUpproj;
+    const slopeDiff = byteSlopeUpproj - byteSlopeAbsorbed;
+
+    let crossoverSq = null;
+    if (slopeDiff > 0) {
+        const sq = Math.ceil(interceptDiff / slopeDiff);
+        if (sq > 0) crossoverSq = sq;
+    }
+
+    // FLOPs crossover
+    const flopInterceptDiff = flopInterceptAbsorbed - flopInterceptUpproj;
+    const flopSlopeDiff = flopSlopeUpproj - flopSlopeAbsorbed;
+    let crossoverSqFlops = null;
+    if (flopSlopeDiff > 0) {
+        const sq = Math.ceil(flopInterceptDiff / flopSlopeDiff);
+        if (sq > 0) crossoverSqFlops = sq;
+    }
+
+    return {
+        crossoverSq,
+        crossoverSqFlops,
+        S,
+        // per-query-token costs (slope vs S_q)
+        bytesPerQueryUpproj: byteSlopeUpproj,
+        bytesPerQueryAbsorbed: byteSlopeAbsorbed,
+        flopsPerQueryUpproj: flopSlopeUpproj,
+        flopsPerQueryAbsorbed: flopSlopeAbsorbed,
+        // S-dependent fixed costs (intercept: weights + cache ops, independent of S_q)
+        fixedBytesUpproj: byteInterceptUpproj,
+        fixedBytesAbsorbed: byteInterceptAbsorbed,
+        fixedFlopsUpproj: flopInterceptUpproj,
+        fixedFlopsAbsorbed: flopInterceptAbsorbed,
+    };
+}
+
+function updateStatsOverlay(graphs, labels, crossover) {
     const container = d3.select('#stats-overlay');
     container.html('');
 
@@ -530,13 +596,12 @@ function updateStatsOverlay(graphs, labels) {
         const thead = table.append('tr');
         thead.append('td').style('color', '#666').style('padding', '2px 6px 2px 0').text('GPU');
         thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Compute');
-        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bandwidth');
-        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bottleneck');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Memory');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bound');
         thead.append('td').style('color', '#666').style('padding', '2px 0 2px 6px').style('text-align', 'right').text('Time');
 
         for (const key of gpuKeys) {
             const gpu = GPU_SPECS[key];
-            const threshold = computeRooflineThreshold(key);
             const computeTime = totals.totalFlops > 0 ? totals.totalFlops / (gpu.peakTFLOPS_bf16 * 1e12) : 0;
             const memTime = totals.totalBytes / (gpu.bandwidthTBs * 1e12);
             const bottleneck = totals.totalFlops === 0 ? 'MEM'
@@ -564,6 +629,111 @@ function updateStatsOverlay(graphs, labels) {
                 .style('margin', '8px 0');
         }
     });
+
+    // Show crossover analysis for MLA dual-graph view
+    if (crossover != null && graphs.length === 2) {
+        container.append('div')
+            .style('border-top', '1px solid #2a2d3a')
+            .style('margin', '8px 0');
+
+        const totals0 = computePipelineTotals(graphs[0]);
+        const totals1 = computePipelineTotals(graphs[1]);
+        const absorbedCheaper = totals1.totalBytes < totals0.totalBytes;
+
+        const heading = container.append('div')
+            .style('font-weight', '600')
+            .style('color', '#bbb')
+            .style('font-size', '11px')
+            .style('margin-bottom', '4px')
+            .text(`Crossover analysis (S\u2009=\u2009${crossover.S})`);
+
+        container.append('div')
+            .style('font-size', '10px')
+            .style('color', '#888')
+            .style('margin-bottom', '6px')
+            .style('font-style', 'italic')
+            .text('cost(S_q) = m \u00b7 S_q + b');
+
+        const grid = container.append('div')
+            .style('display', 'grid')
+            .style('grid-template-columns', 'auto auto auto')
+            .style('gap', '1px 8px')
+            .style('font-size', '10px')
+            .style('margin-bottom', '6px');
+
+        function addRow(label, v1, v2, opts) {
+            const highlight = opts?.highlight;
+            grid.append('span').style('color', '#888').text(label);
+            const s1 = grid.append('span').style('text-align', 'right');
+            const s2 = grid.append('span').style('text-align', 'right');
+            if (highlight) {
+                const better = v1 < v2 ? s1 : s2;
+                const worse = v1 < v2 ? s2 : s1;
+                better.style('color', '#2ecc71');
+                worse.style('color', '#aaa');
+            } else {
+                s1.style('color', '#aaa');
+                s2.style('color', '#aaa');
+            }
+            s1.text(opts?.fmt(v1) || v1);
+            s2.text(opts?.fmt(v2) || v2);
+        }
+
+        // Header
+        grid.append('span').style('color', '#666').text('');
+        grid.append('span').style('color', '#666').style('text-align', 'right').text('MHA-st.');
+        grid.append('span').style('color', '#666').style('text-align', 'right').text('MQA-st.');
+
+        // Intercept: costs independent of S_q (weights, K/V expansion)
+        addRow('b (xfer)', crossover.fixedBytesUpproj, crossover.fixedBytesAbsorbed,
+            { fmt: fmtBytes, highlight: true });
+        addRow('b (FLOPs)', crossover.fixedFlopsUpproj, crossover.fixedFlopsAbsorbed,
+            { fmt: fmtNum, highlight: true });
+
+        // Spacer
+        grid.append('span').html('&nbsp;');
+        grid.append('span');
+        grid.append('span');
+
+        // Slope: marginal cost per query token
+        addRow('m (xfer)', crossover.bytesPerQueryUpproj, crossover.bytesPerQueryAbsorbed,
+            { fmt: v => fmtBytes(v) + '/q', highlight: true });
+        addRow('m (FLOPs)', crossover.flopsPerQueryUpproj, crossover.flopsPerQueryAbsorbed,
+            { fmt: v => fmtNum(v) + '/q', highlight: true });
+
+        // Crossover result
+        const result = container.append('div')
+            .style('font-size', '11px')
+            .style('color', '#999')
+            .style('line-height', '1.4')
+            .style('margin-top', '6px');
+
+        const atS = `at S=${crossover.S}, `;
+
+        // Transfer crossover
+        if (absorbedCheaper) {
+            result.html(`Xfer: ${atS}<span style="color:#2ecc71">MQA-style wins</span> at current S_q`);
+        } else if (crossover.crossoverSq != null) {
+            result.html(`Xfer: ${atS}absorbed wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${crossover.crossoverSq}</span>`);
+        } else {
+            result.html(`Xfer: ${atS}<span style="color:#e74c3c">MHA-style wins</span> at all S_q`);
+        }
+
+        // Compute crossover
+        const totalsFlopsAbsorbedCheaper = totals1.totalFlops < totals0.totalFlops;
+        const compResult = container.append('div')
+            .style('font-size', '11px')
+            .style('color', '#999')
+            .style('line-height', '1.4');
+
+        if (totalsFlopsAbsorbedCheaper) {
+            compResult.html(`FLOPs: ${atS}<span style="color:#2ecc71">MQA-style wins</span> at current S_q`);
+        } else if (crossover.crossoverSqFlops != null) {
+            compResult.html(`FLOPs: ${atS}absorbed wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${crossover.crossoverSqFlops}</span>`);
+        } else {
+            compResult.html(`FLOPs: ${atS}<span style="color:#e74c3c">MHA-style wins</span> at all S_q`);
+        }
+    }
 }
 
 // --- Update ---
@@ -661,7 +831,8 @@ function renderMlaStacked() {
         .attr('font-family', 'Inter, system-ui, sans-serif')
         .text('MQA-style (absorbed)');
 
-    updateStatsOverlay([upprojGraph, absorbedGraph], ['MHA-style (up-projected)', 'MQA-style (absorbed)']);
+    const crossover = computeMlaCrossover(params);
+    updateStatsOverlay([upprojGraph, absorbedGraph], ['MHA-style (up-projected)', 'MQA-style (absorbed)'], crossover);
 
     refreshDetail([upprojGraph, absorbedGraph], params);
 }
