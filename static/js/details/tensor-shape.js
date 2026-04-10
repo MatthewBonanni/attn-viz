@@ -67,11 +67,9 @@ export function drawTensorShapeDetail(svg, tensor, params) {
         const rawH = shape[shape.length - 2];
         const depth = shape.length === 4 ? shape[0] * shape[1] : shape[0];
         const [h, w] = detailScale2(rawH, rawW);
-        // Scale depth proportionally: use same factor as the larger face axis,
-        // then cap so the isometric offset doesn't dominate the panel.
-        const maxFaceSqrt = Math.max(Math.sqrt(rawH), Math.sqrt(rawW));
-        const faceFactor = maxFaceSqrt > 0 ? Math.max(w, h) / maxFaceSqrt : 1;
-        const d = Math.max(16, Math.min(50, Math.sqrt(depth) * faceFactor * 0.35));
+        // Scale depth independently from face dimensions so that small depths
+        // (e.g. B=1) look noticeably thinner than large ones (e.g. B·n_h=128).
+        const d = Math.max(4, Math.min(100, Math.sqrt(depth) * 8));
         const dxTotal = d * 0.7;
         const dyTotal = -d * 0.4;
         const x = mid - w / 2, y = d * 0.4 + 36;

@@ -28,7 +28,7 @@ export function drawRopeDetail(svg, op, tensorMap) {
     const bw = blockScale(inShape[inShape.length - 1]);
     const bh = blockScale(inShape[inShape.length - 2]);
     const bDepthVal = inShape.length >= 3 ? inShape[0] * (inShape.length >= 4 ? inShape[1] : 1) : 1;
-    const bd = Math.max(16, Math.min(40, Math.sqrt(bDepthVal) * 5));
+    const bd = Math.max(4, Math.min(100, Math.sqrt(bDepthVal) * 8));
 
     const tensorBlockX = mid - bw / 2;
     const tensorBlockY = 20 + bd * 0.4;

@@ -154,7 +154,7 @@ export function drawMatmulDetail(svg, op, tensorMap) {
             .attr('x', svgW / 2).attr('y', noteY)
             .attr('text-anchor', 'middle')
             .attr('font-size', '14px')
-            .text('Reshape / Concat Heads');
+            .text('Reshape / View');
         noteY += 24;
 
         // Scale for reshape blocks — ratio-preserving across both shapes
@@ -173,14 +173,14 @@ export function drawMatmulDetail(svg, op, tensorMap) {
         const beforeH = reshScale(matmulResultShape[matmulResultShape.length - 2]);
         const beforeDepthVal = matmulResultShape.length >= 3
             ? matmulResultShape.slice(0, -2).reduce((a, b) => a * b, 1) : 1;
-        const beforeD = Math.max(12, Math.min(40, Math.sqrt(beforeDepthVal) * reshFactor * 0.6));
+        const beforeD = Math.max(4, Math.min(100, Math.sqrt(beforeDepthVal) * 8));
 
         // After block dimensions (final output shape)
         const afterW = reshScale(shC[shC.length - 1]);
         const afterH = reshScale(shC[shC.length - 2]);
         const afterDepthVal = shC.length >= 3
             ? shC.slice(0, -2).reduce((a, b) => a * b, 1) : 1;
-        const afterD = Math.max(12, Math.min(40, Math.sqrt(afterDepthVal) * reshFactor * 0.6));
+        const afterD = Math.max(4, Math.min(100, Math.sqrt(afterDepthVal) * 8));
 
         // Layout: center both blocks + arrow in available width
         const arrowGap = 100;
@@ -293,7 +293,7 @@ export function drawMatmulDetail(svg, op, tensorMap) {
             g.append('text').attr('class', 'dim-label')
                 .attr('x', svgW / 2).attr('y', noteY)
                 .attr('text-anchor', 'middle').attr('fill', '#7c8cf8').attr('font-size', '11px')
-                .text(`Concat ${n_h_val} heads: n_h \u00d7 d_h = ${n_h_val} \u00d7 ${d_h_val} = ${D_val} = D`);
+                .text(`View ${n_h_val} heads: n_h \u00d7 d_h = ${n_h_val} \u00d7 ${d_h_val} = ${D_val} = D`);
             noteY += 22;
         }
     }

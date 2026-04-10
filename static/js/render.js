@@ -48,6 +48,14 @@ export function dimScale(value) {
     return Math.max(MIN_DIM_PX, Math.min(MAX_DIM_PX, scaled));
 }
 
+// Like dimScale but with a much lower floor, for depth dimensions where
+// a value of 1 should look noticeably thinner than 128.
+const MIN_DEPTH_PX = 4;
+function depthDimScale(value) {
+    const scaled = Math.sqrt(value) * _dimScaleFactor;
+    return Math.max(MIN_DEPTH_PX, Math.min(MAX_DIM_PX, scaled));
+}
+
 // --- Isometric helpers ---
 
 function depthOffset(d) {
@@ -69,11 +77,11 @@ export function tensorGeometry(shape) {
     } else if (shape.length === 3) {
         w = dimScale(shape[2]);
         h = dimScale(shape[1]);
-        d = dimScale(shape[0]) * DEPTH_SCALE;
+        d = depthDimScale(shape[0]) * DEPTH_SCALE;
     } else if (shape.length === 4) {
         w = dimScale(shape[3]);
         h = dimScale(shape[2]);
-        d = dimScale(shape[0] * shape[1]) * DEPTH_SCALE;
+        d = depthDimScale(shape[0] * shape[1]) * DEPTH_SCALE;
     } else {
         w = 40; h = 40; d = 0;
     }
@@ -129,8 +137,6 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             draw4DTpDepth(group, x, y, w, h, off, shape[0], shape[1], tensor.tpSize);
         } else if (tensor.tpSharded && tensor.tpSize > 1) {
             drawTpStripes(group, x + w, y, off, h, tensor.tpSize);
-        } else if (shape.length === 4 && type !== 'weight' && type !== 'mask') {
-            draw4DDepthLines(group, x, y, w, h, off, shape[0], shape[1]);
         }
     }
 
@@ -216,33 +222,7 @@ function drawTpStripes(group, rx, fy, off, h, tpSize) {
     }
 }
 
-// --- 4D depth layer lines (B × n_h grouping) ---
-
-function draw4DDepthLines(group, x, y, w, h, off, B, n_h) {
-    const total = B * n_h;
-    // Skip individual head lines if too many; only show batch boundaries
-    const showHeadLines = total <= 16;
-    const slices = total;
-
-    for (let i = 1; i < slices; i++) {
-        const isBatchBoundary = (i % n_h === 0);
-        if (!showHeadLines && !isBatchBoundary) continue;
-
-        const frac = i / slices;
-        const lx = off.dx * frac;
-        const ly = off.dy * frac;
-
-        const opacity = isBatchBoundary ? 0.6 : 0.25;
-        const strokeW = isBatchBoundary ? 1 : 0.75;
-
-        // L-shaped line across top face and down right face, joined at corner
-        group.append('polyline')
-            .attr('points', `${x + lx},${y + ly} ${x + w + lx},${y + ly} ${x + w + lx},${y + h + ly}`)
-            .attr('fill', 'none')
-            .attr('stroke', '#fff').attr('stroke-opacity', opacity)
-            .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
-    }
-}
+// --- 4D depth layer lines (B × n_h grouping) --- removed: visual noise without TP coloring
 
 // --- Combined 4D + TP depth rendering ---
 

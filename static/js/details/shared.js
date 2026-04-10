@@ -110,25 +110,6 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
                 .attr('stroke', '#fff').attr('stroke-opacity', opacity)
                 .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
         }
-    } else if (grouping) {
-        // 4D depth grouping lines (no TP)
-        const { outer, inner } = grouping;
-        const total = outer * inner;
-        const showInnerLines = total <= 16;
-        for (let i = 1; i < total; i++) {
-            const isBatch = (i % inner === 0);
-            if (!showInnerLines && !isBatch) continue;
-            const frac = i / total;
-            const lx = dx * frac;
-            const ly = dy * frac;
-            const opacity = isBatch ? 0.6 : 0.25;
-            const strokeW = isBatch ? 1 : 0.75;
-            g.append('polyline')
-                .attr('points', `${x+lx},${y+ly} ${x+w+lx},${y+ly} ${x+w+lx},${y+h+ly}`)
-                .attr('fill', 'none')
-                .attr('stroke', '#fff').attr('stroke-opacity', opacity)
-                .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
-        }
     }
 
     // Front face

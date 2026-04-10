@@ -29,13 +29,13 @@ export function drawBroadcastDetail(svg, op, tensorMap) {
     const inW = scale(inShape[inShape.length - 1]);
     const inH = scale(inShape[inShape.length - 2]);
     const inDepthVal = inShape.length >= 3 ? inShape[0] * (inShape.length >= 4 ? inShape[1] : 1) : 1;
-    const inD = Math.max(10, Math.min(35, Math.sqrt(inDepthVal) * scaleFactor * 0.7));
+    const inD = Math.max(4, Math.min(100, Math.sqrt(inDepthVal) * 8));
 
     // Output block dimensions
     const outW = scale(outShape[outShape.length - 1]);
     const outH = scale(outShape[outShape.length - 2]);
     const outDepthVal = outShape.length >= 3 ? outShape[0] * (outShape.length >= 4 ? outShape[1] : 1) : 1;
-    const outD = Math.max(10, Math.min(60, Math.sqrt(outDepthVal) * scaleFactor * 0.7));
+    const outD = Math.max(4, Math.min(100, Math.sqrt(outDepthVal) * 8));
 
     // Center the two blocks with arrow in available width
     // Reshape/view ops need wider gap since input depth label + output left label crowd the arrow
