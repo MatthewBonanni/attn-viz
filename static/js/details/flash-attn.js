@@ -25,9 +25,9 @@ export function drawFlashAttnDetail(svg, op, tensorMap, params) {
     // Identify Q, K, V, mask from the fused op's inputs
     const mask = inputTensors.find(t => t.type === 'mask');
     // Auxiliary RoPE tensors (not primary Q/K/V)
-    const auxIds = new Set(['q_r', 'q_rp', 'k_r']);
+    const auxIds = new Set(['q_r', 'q_rp', 'q_pe', 'k_r']);
     const Q = inputTensors.find(t => !auxIds.has(t.id) && t !== mask &&
-        (t.id.startsWith('Q') || t.id === 'q_lat'));
+        (t.id.startsWith('Q') || t.id === 'q_lat' || t.id === 'q_nope'));
     // K/V: non-Q, non-mask, non-auxiliary tensors
     const kvTensors = inputTensors.filter(t => t !== Q && t !== mask && !auxIds.has(t.id));
     const K = kvTensors[0];

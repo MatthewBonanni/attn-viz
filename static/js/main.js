@@ -3,7 +3,7 @@
 import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
-import { computePipelineTotals, fmtNum, fmtBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
+import { computePipelineTotals, fmtNum, fmtBytes, tensorBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph,
@@ -23,7 +23,8 @@ const SLIDER_DEFS = {
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
     d_h:    { label: 'd_h (head dim)',    min: 1, max: 256,  step: 1,  default: 64 },
     n_kv:   { label: 'n_kv (KV heads)',   min: 1, max: 128,  step: 1,  default: 2 },
-    d_c:    { label: 'd_c (latent dim)',  min: 1, max: 4096, step: 1,  default: 512 },
+    d_c:    { label: 'd_c (KV latent)',   min: 1, max: 4096, step: 1,  default: 512 },
+    d_q:    { label: 'd_q (Q latent)',   min: 1, max: 4096, step: 1,  default: 1536 },
     d_r:    { label: 'd_r (RoPE dim)',   min: 1, max: 256,  step: 1,  default: 64 },
     tp_size:{ label: 'TP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
@@ -35,7 +36,7 @@ const VARIANT_SLIDERS = {
     mha: ['n_h', 'd_h', 'tp_size'],
     gqa: ['n_h', 'd_h', 'n_kv', 'tp_size'],
     mqa: ['n_h', 'd_h', 'tp_size'],
-    mla: ['n_h', 'd_h', 'd_c', 'd_r', 'tp_size'],
+    mla: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r', 'tp_size'],
 };
 
 // Model presets
@@ -53,7 +54,7 @@ const PRESETS = [
     { name: 'Phi-4 14B', variant: 'gqa', n_h: 40, d_h: 128, n_kv: 10 },
     { name: 'Command A (111B, MoE)', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'StarCoder (15B)', variant: 'mqa', n_h: 48, d_h: 128 },
-    { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_r: 64 },
+    { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_q: 1536, d_r: 64 },
 ];
 
 // Default preset index per variant
@@ -128,7 +129,7 @@ function buildVariantTabs() {
                 const presetIdx = VARIANT_DEFAULT_PRESETS[v.id] || 0;
                 const preset = PRESETS[presetIdx];
                 if (preset && preset.variant) {
-                    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+                    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
                         if (preset[key] != null) params[key] = preset[key];
                     }
                 }
@@ -166,7 +167,7 @@ function buildPresets() {
 
         hideDetail();
         currentVariant = preset.variant;
-        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
             if (preset[key] != null) params[key] = preset[key];
         }
 
@@ -247,7 +248,7 @@ function buildSlider(container, key) {
         params[key] = v;
 
         // Switch preset to "Custom" when a model architecture param changes
-        if (['n_h', 'd_h', 'n_kv', 'd_c', 'd_r'].includes(key)) {
+        if (['n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r'].includes(key)) {
             d3.select('#preset-select').property('value', '0');
         }
 
@@ -548,15 +549,19 @@ function fmtTime(seconds) {
 // (higher per-S_q cost since d_c >> d_h). So MQA wins at small S_q (decode) and
 // MHA wins at large S_q (prefill). We find where the two lines cross.
 function computeMlaCrossover(params) {
-    const S = params.S || 1;
+    // Use the max context length across all requests in the batch.
+    const S = Math.max(...(params.seqLens || []).slice(0, params.B || 1), params.S || 1);
     // Evaluate at two S_q points to extract the linear relationship.
     // Use S_q = 1 and S_q = max(2, min(S, 201)). When S=1, bump effective S
     // to 2 so we have two valid sample points.
+    // Force B=1 and clear batch totals so swept S_q actually takes effect
+    // (graph functions prefer sumSq/sumS over S_q/S).
     const effS = Math.max(S, 2);
     const sqLo = 1;
     const sqHi = Math.min(effS, 201);
-    const p1 = { ...params, S: effS, S_q: sqLo };
-    const p2 = { ...params, S: effS, S_q: sqHi };
+    const base = { ...params, B: 1, sumSq: undefined, sumS: undefined };
+    const p1 = { ...base, S: effS, S_q: sqLo };
+    const p2 = { ...base, S: effS, S_q: sqHi };
     const dSq = sqHi - sqLo;
 
     const g_up1 = mlaUpprojGraph(p1);
@@ -578,10 +583,28 @@ function computeMlaCrossover(params) {
     // Bytes as a function of S_q: total = slope * S_q + intercept
     const byteSlopeUpproj = (upproj2.totalBytes - upproj1.totalBytes) / dSq;
     const byteSlopeAbsorbed = (absorbed2.totalBytes - absorbed1.totalBytes) / dSq;
-    const byteInterceptUpproj = upproj1.totalBytes - byteSlopeUpproj * sqLo;
-    const byteInterceptAbsorbed = absorbed1.totalBytes - byteSlopeAbsorbed * sqLo;
+    let byteInterceptUpproj = upproj1.totalBytes - byteSlopeUpproj * sqLo;
+    let byteInterceptAbsorbed = absorbed1.totalBytes - byteSlopeAbsorbed * sqLo;
 
-    // FLOPs as a function of S_q
+    // Weight amortization: weights are loaded once per batch from HBM, so the
+    // per-request weight transfer cost is weightBytes/B. Adjust the byte
+    // intercepts (where weight reads live) to reflect this.
+    const B = params.B || 1;
+    if (B > 1) {
+        function graphWeightBytes(graph) {
+            return graph.tensors
+                .filter(t => t.type === 'weight')
+                .reduce((sum, t) => sum + tensorBytes(t.shape), 0);
+        }
+        const wUp = graphWeightBytes(g_up1);
+        const wAb = graphWeightBytes(g_ab1);
+        // Remove the (1 - 1/B) fraction of weight bytes that's shared
+        byteInterceptUpproj -= wUp * (1 - 1 / B);
+        byteInterceptAbsorbed -= wAb * (1 - 1 / B);
+    }
+
+    // FLOPs as a function of S_q (not affected by weight amortization —
+    // each request still requires the same compute)
     const flopSlopeUpproj = (upproj2.totalFlops - upproj1.totalFlops) / dSq;
     const flopSlopeAbsorbed = (absorbed2.totalFlops - absorbed1.totalFlops) / dSq;
     const flopInterceptUpproj = upproj1.totalFlops - flopSlopeUpproj * sqLo;
@@ -620,7 +643,7 @@ function computeMlaCrossover(params) {
             byteSlopeUpproj, byteSlopeAbsorbed) : null,
         flopsAlwaysWinner: !flopsCrossover ? alwaysWinner(flopInterceptUpproj, flopInterceptAbsorbed,
             flopSlopeUpproj, flopSlopeAbsorbed) : null,
-        S,
+        S, B,
         // per-query-token costs (slope vs S_q)
         bytesPerQueryUpproj: byteSlopeUpproj,
         bytesPerQueryAbsorbed: byteSlopeAbsorbed,
@@ -727,7 +750,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
             .style('color', '#bbb')
             .style('font-size', '11px')
             .style('margin-bottom', '4px')
-            .text(`Crossover analysis (S\u2009=\u2009${crossover.S})`);
+            .text(`Crossover analysis (S\u2009=\u2009${crossover.S}, B\u2009=\u2009${crossover.B})`);
 
         container.append('div')
             .style('font-size', '10px')
@@ -783,30 +806,42 @@ function updateStatsOverlay(graphs, labels, crossover) {
         addRow('m (FLOPs)', crossover.flopsPerQueryUpproj, crossover.flopsPerQueryAbsorbed,
             { fmt: v => fmtNum(v) + '/q', highlight: true });
 
-        // Crossover results
-        const atS = `at S=${crossover.S}, `;
+        // Crossover results — highlighted card
+        const resultBox = container.append('div')
+            .style('margin-top', '8px')
+            .style('padding', '8px 10px')
+            .style('border', '1px solid #3a3d4a')
+            .style('border-radius', '6px')
+            .style('background', '#1a1c2a');
 
-        function crossoverLine(label, xover, alwaysWinner) {
-            const line = container.append('div')
+        const atCtx = `S\u2009=\u2009${crossover.S}, B\u2009=\u2009${crossover.B}` +
+            (crossover.B > 1 ? ' (weights amortized)' : '');
+
+        function crossoverLine(parent, label, xover, alwaysWinner) {
+            const line = parent.append('div')
                 .style('font-size', '11px')
-                .style('color', '#999')
-                .style('line-height', '1.4')
-                .style('margin-top', label === 'Xfer' ? '6px' : '0');
+                .style('line-height', '1.6');
             if (xover) {
-                if (xover.mqaWinsBelow) {
-                    line.html(`${label}: ${atS}MQA wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2264 ${xover.sq}</span>`);
-                } else {
-                    line.html(`${label}: ${atS}MQA wins at <span style="color:#7c8cf8;font-weight:600">S_q \u2265 ${xover.sq}</span>`);
-                }
+                const dir = xover.mqaWinsBelow ? '\u2264' : '\u2265';
+                line.html(`<span style="color:#999">${label}:</span> ` +
+                    `<span style="color:#ccc">MQA-style wins at</span> ` +
+                    `<span style="color:#7c8cf8;font-weight:600">S_q ${dir} ${xover.sq}</span>`);
             } else {
-                const winner = alwaysWinner === 'mqa' ? 'MQA' : 'MHA';
-                const color = alwaysWinner === 'mqa' ? '#2ecc71' : '#e74c3c';
-                line.html(`${label}: ${atS}<span style="color:${color}">${winner} always wins</span>`);
+                const winner = alwaysWinner === 'mqa' ? 'MQA-style' : 'MHA-style';
+                const color = alwaysWinner === 'mqa' ? '#2ecc71' : '#e67e22';
+                line.html(`<span style="color:#999">${label}:</span> ` +
+                    `<span style="color:${color};font-weight:600">${winner} wins for any S_q</span>`);
             }
         }
 
-        crossoverLine('Xfer', crossover.bytesCrossover, crossover.bytesAlwaysWinner);
-        crossoverLine('FLOPs', crossover.flopsCrossover, crossover.flopsAlwaysWinner);
+        crossoverLine(resultBox, 'Xfer', crossover.bytesCrossover, crossover.bytesAlwaysWinner);
+        crossoverLine(resultBox, 'FLOPs', crossover.flopsCrossover, crossover.flopsAlwaysWinner);
+
+        resultBox.append('div')
+            .style('font-size', '9px')
+            .style('color', '#666')
+            .style('margin-top', '4px')
+            .text(atCtx);
     }
 }
 
@@ -1154,7 +1189,7 @@ svg.on('click', () => {
 const initPresetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
 const initPreset = PRESETS[initPresetIdx];
 if (initPreset && initPreset.variant) {
-    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_r']) {
+    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
         if (initPreset[key] != null) params[key] = initPreset[key];
     }
 }
