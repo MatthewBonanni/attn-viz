@@ -117,9 +117,12 @@ export function drawPagedCacheDetail(svg, _tensor, params) {
 
     // Block shape info
     y += 4;
+    const blockDimStr = _tensor.pagedBlockDims
+        ? _tensor.pagedBlockDims.map((d, i) => `${d}=${_tensor.pagedBlockShape[i]}`).join(', ')
+        : 'n_heads, d_h';
     g.append('text').attr('class', 'dim-label')
         .attr('x', 0).attr('y', y).attr('fill', '#777')
-        .text(`Each block: [${bs}, n_heads, d_h]`);
+        .text(`Each block: [${bs}, ${blockDimStr}]`);
     y += 14;
     g.append('text').attr('class', 'dim-label')
         .attr('x', 0).attr('y', y).attr('fill', '#777')

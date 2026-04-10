@@ -606,6 +606,19 @@ export function computeLayout(graph, sharedStageX) {
         op._y = (output._layoutY || 0) + tensorGeometry(output.shape).h / 2;
     }
 
+    // Align ops that share the same alignX group
+    const alignGroups = {};
+    for (const op of graph.ops) {
+        if (op.alignX) {
+            if (!alignGroups[op.alignX]) alignGroups[op.alignX] = [];
+            alignGroups[op.alignX].push(op);
+        }
+    }
+    for (const group of Object.values(alignGroups)) {
+        const maxX = Math.max(...group.map(o => o._x));
+        for (const op of group) op._x = maxX;
+    }
+
     graph._stageXRanges = stageXRanges;
     graph._centerY = centerY;
     graph._maxTotalH = totalH;
@@ -629,10 +642,18 @@ export function drawOpNode(g, op, onClick) {
         .attr('stroke', opColor(op.type))
         .attr('stroke-width', 2);
 
-    group.append('text')
+    const sym = opSymbol(op.type);
+    // Per-glyph nudges: some Unicode symbols have asymmetric shapes
+    // that shift their visual center away from the text anchor
+    const glyphTweak = { rope: { dx: 2, dy: 6, size: 26 },
+                         mask: { dx: 0, dy: 6, size: 16 } };
+    const tw = glyphTweak[op.type] || { dx: 1, dy: 7, size: 21 };
+    const label = group.append('text')
         .attr('class', 'op-label')
-        .attr('x', op._x).attr('y', op._y + 4)
-        .text(opSymbol(op.type));
+        .attr('x', op._x + tw.dx)
+        .attr('y', op._y + tw.dy)
+        .text(sym);
+    if (tw.size) label.style('font-size', tw.size + 'px');
 
     group.append('text')
         .attr('class', 'dim-label')
@@ -696,7 +717,8 @@ export function drawArrows(g, graph) {
             const yOff = validInputs.length > 1 ? (idx - (validInputs.length - 1) / 2) * 8 : 0;
 
             // Pull back endpoint by arrowhead length so tip touches the op circle
-            drawRoutedArrow(g, sx, sy, op._x - OP_RADIUS - ARROWHEAD_LEN, op._y + yOff, graph, [t.id]);
+            const forceBelow = op.routeBelow && op.routeBelow.includes(t.id);
+            drawRoutedArrow(g, sx, sy, op._x - OP_RADIUS - ARROWHEAD_LEN, op._y + yOff, graph, [t.id], forceBelow);
         }
 
         // Arrow from op to output
@@ -720,7 +742,7 @@ function lineHitsRect(x1, y1, x2, y2, rect, margin) {
     return arrowY >= rect.top - margin && arrowY <= rect.bottom + margin;
 }
 
-function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
+function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds, forceBelow) {
     const COLLISION_MARGIN = 8;
     let d;
 
@@ -733,8 +755,10 @@ function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
         if (colliders.length > 0) {
             const topBound = Math.min(...colliders.map(r => r.top)) - 20;
             const bottomBound = Math.max(...colliders.map(r => r.bottom)) + 20;
-            // Route toward the side closest to where the arrow starts
-            const routeY = y1 <= (topBound + bottomBound) / 2 ? topBound : bottomBound;
+            // Route toward the side closest to where the arrow starts,
+            // unless forceBelow is set
+            const routeY = forceBelow ? bottomBound
+                : y1 <= (topBound + bottomBound) / 2 ? topBound : bottomBound;
 
             const dx = x2 - x1;
             const bend = Math.min(dx * 0.2, 30);
@@ -750,10 +774,10 @@ function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
 
     const ag = g.append('g').attr('class', 'arrow-group');
     ag.append('path').attr('class', 'arrow-hit').attr('d', d);
-    const visPath = ag.append('path').attr('class', 'arrow-path').attr('d', d)
-        .attr('marker-end', 'url(#arrowhead)');
-    ag.on('mouseenter', () => visPath.attr('marker-end', 'url(#arrowhead-hover)'))
-      .on('mouseleave', () => visPath.attr('marker-end', 'url(#arrowhead)'));
+    ag.append('path').attr('class', 'arrow-path').attr('d', d);
+    // Inline arrowhead so CSS :hover on the group highlights it
+    ag.append('polygon').attr('class', 'arrow-head')
+        .attr('points', `${x2},${y2-3} ${x2+ARROWHEAD_LEN},${y2} ${x2},${y2+3}`);
 }
 
 // --- Full render ---

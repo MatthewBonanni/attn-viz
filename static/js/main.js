@@ -548,13 +548,33 @@ function addPagedAnnotations(graph, params) {
             t.desc = `Variable-length causal mask for paged attention. ${reqDescs}. Total ${totalTokens} tokens. Each request attends only within its own sequence (block-diagonal) and causally.`;
         }
         // Mark KV cache tensors with paged layout
-        const isKV = t.id === 'K' || t.id === 'V' || t.id === 'K_1' || t.id === 'V_1' ||
-                     t.id === 'K_g' || t.id === 'V_g' || t.id === 'c_KV';
-        if (isKV && !t.badge) {
+        // MLA caches c_kv + k_r (not decompressed K, V)
+        const hasCKV = graph.tensors.some(t2 => t2.id === 'c_KV');
+        let isCache = false;
+        if (hasCKV) {
+            isCache = t.id === 'c_KV' || t.id === 'k_r';
+        } else {
+            isCache = t.id === 'K' || t.id === 'V' || t.id === 'K_1' || t.id === 'V_1' ||
+                      t.id === 'K_g' || t.id === 'V_g';
+        }
+        if (isCache) {
             t.badge = 'PAGED';
-            const isK = t.id.startsWith('K');
-            t.desc = `${isK ? 'Key' : 'Value'} cache stored in paged blocks. ` +
-                `Physical layout: [num_blocks, block_size, n_heads, d_h]. ` +
+            // Derive per-token dims from shape (remove B and S)
+            const perTokenDims = t.shape.length === 4
+                ? t.dimNames.slice(1, 2).concat(t.dimNames.slice(3))  // [n_h, d_h]
+                : t.dimNames.slice(2);  // [d_c] or [d_r]
+            const perTokenShape = t.shape.length === 4
+                ? [t.shape[1], t.shape[3]]
+                : t.shape.slice(2);
+            t.pagedBlockDims = perTokenDims;
+            t.pagedBlockShape = perTokenShape;
+            const layoutStr = `[num_blocks, block_size, ${perTokenDims.join(', ')}]`;
+            let cacheName;
+            if (t.id === 'c_KV') cacheName = 'Compressed KV latent';
+            else if (t.id === 'k_r') cacheName = 'Decoupled RoPE key';
+            else cacheName = t.id.startsWith('K') ? 'Key' : 'Value';
+            t.desc = `${cacheName} cache stored in paged blocks. ` +
+                `Physical layout: ${layoutStr}. ` +
                 `Each sequence maps to non-contiguous blocks via a block table. ` +
                 `Block size=${bs}, blocks per seq: [${blocksPerSeq.join(', ')}], total blocks: ${totalBlocks}. ` +
                 `New tokens are appended to the last block; a new block is allocated when the current one fills.`;

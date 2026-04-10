@@ -179,12 +179,13 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 .dim-label { font-size: 10px; fill: #999; font-family: 'Inter', system-ui, monospace; }
 .dim-line { stroke: #555; stroke-width: 1; }
 .tensor-label { font-size: 11px; fill: #fff; font-weight: 600; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
-.op-label { font-size: 12px; fill: #ddd; font-weight: 500; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
-.arrow-group { pointer-events: stroke; cursor: pointer; }
+.op-label { font-size: 14px; fill: #ddd; font-weight: 500; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
+.arrow-group { cursor: pointer; }
 .arrow-hit  { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; }
 .arrow-path { fill: none; stroke: #555; stroke-width: 1.5; pointer-events: none; }
-.arrow-head { fill: #555; }
+.arrow-head { fill: #555; pointer-events: none; }
 .arrow-group:hover .arrow-path { stroke: #9ba3ff; stroke-width: 2.5; }
+.arrow-group:hover .arrow-head { fill: #9ba3ff; }
 .badge { font-size: 8px; fill: #fff; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
 .badge-bg { rx: 3; ry: 3; }
 .stage-label { font-size: 9px; fill: #555; font-weight: 500; text-anchor: middle; font-family: 'Inter', system-ui, sans-serif; }
