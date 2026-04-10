@@ -18,8 +18,8 @@ const VARIANTS = [
 
 const SLIDER_DEFS = {
     B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 2 },
-    S:      { label: 'S (seq length)',     min: 1, max: 128,  step: 1,  default: 8 },
-    S_q:    { label: 'S_q (query len)',   min: 1, max: 128,  step: 1,  default: 8 },
+    S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 8, logScale: true },
+    S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 8, logScale: true },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
     d_h:    { label: 'd_h (head dim)',    min: 1, max: 256,  step: 1,  default: 64 },
     n_kv:   { label: 'n_kv (KV heads)',   min: 1, max: 128,  step: 1,  default: 2 },
@@ -191,7 +191,21 @@ function buildSlider(container, key) {
     header.append('span').attr('class', 'dim-name').text(def.label);
 
     const isLog2 = key === 'B' || key === 'tp_size';
+    const isLogScale = def.logScale;
     const effectiveMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+
+    // Log-scale helpers: slider 0–1000 maps to min..max via log interpolation
+    const LOG_STEPS = 1000;
+    function valToSlider(v) {
+        if (!isLogScale) return isLog2 ? Math.log2(v) : v;
+        const minV = Math.max(1, def.min);
+        return Math.round(LOG_STEPS * Math.log(v / minV) / Math.log(effectiveMax / minV));
+    }
+    function sliderToVal(s) {
+        if (!isLogScale) return isLog2 ? Math.pow(2, s) : s;
+        const minV = Math.max(1, def.min);
+        return Math.round(minV * Math.pow(effectiveMax / minV, s / LOG_STEPS));
+    }
 
     const numInput = header.append('input')
         .attr('class', 'dim-input')
@@ -203,10 +217,10 @@ function buildSlider(container, key) {
 
     const rangeInput = group.append('input')
         .attr('type', 'range')
-        .attr('min', isLog2 ? Math.log2(Math.max(1, def.min)) : def.min)
-        .attr('max', isLog2 ? Math.log2(effectiveMax) : effectiveMax)
-        .attr('step', isLog2 ? 1 : def.step)
-        .attr('value', isLog2 ? Math.log2(params[key]) : params[key]);
+        .attr('min', isLogScale ? 0 : (isLog2 ? Math.log2(Math.max(1, def.min)) : def.min))
+        .attr('max', isLogScale ? LOG_STEPS : (isLog2 ? Math.log2(effectiveMax) : effectiveMax))
+        .attr('step', isLogScale ? 1 : (isLog2 ? 1 : def.step))
+        .attr('value', valToSlider(params[key]));
 
     function onSliderChange(newVal) {
         let v = +newVal;
@@ -238,7 +252,7 @@ function buildSlider(container, key) {
         }
 
         numInput.property('value', params[key]);
-        rangeInput.property('value', isLog2 ? Math.log2(params[key]) : params[key]);
+        rangeInput.property('value', valToSlider(params[key]));
 
         // Extend seqLens/queryLens arrays BEFORE update() so addPagedAnnotations sees the right length
         if ((key === 'B' || key === 'S') && params.pagedAttn) buildSeqLengthInputs();
@@ -267,10 +281,10 @@ function buildSlider(container, key) {
                 const group = this.parentNode;
                 const label = d3.select(group).select('.dim-name').text();
                 if (key === 'S' && label.includes('S_q')) {
-                    d3.select(this).property('value', params.S_q);
+                    d3.select(this).property('value', valToSlider(params.S_q));
                     d3.select(group).select('input[type="number"]').property('value', params.S_q);
                 } else if (key === 'S_q' && label.includes('S (')) {
-                    d3.select(this).property('value', params.S);
+                    d3.select(this).property('value', valToSlider(params.S));
                     d3.select(group).select('input[type="number"]').property('value', params.S);
                 }
             });
@@ -278,8 +292,7 @@ function buildSlider(container, key) {
     }
 
     rangeInput.on('input', function() {
-        const raw = +this.value;
-        onSliderChange(isLog2 ? Math.pow(2, raw) : raw);
+        onSliderChange(sliderToVal(+this.value));
     });
     numInput.on('change', function() {
         const effMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
