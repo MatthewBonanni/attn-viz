@@ -12,7 +12,7 @@ const ARROW_MARGIN = 4;
 const ARROWHEAD_LEN = 8;  // must match markerWidth in index.html
 
 // TP rank colors
-const TP_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#c0392b'];
+export const TP_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#c0392b'];
 
 // --- Scale ---
 
@@ -97,13 +97,12 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             .attr('stroke-dasharray', type === 'weight' ? '4,2' : 'none')
             .attr('stroke-width', 1);
 
-        // TP sharding stripes on right face
-        if (tensor.tpSharded && tensor.tpSize > 1) {
+        // Depth face decorations: TP stripes and/or 4D grouping lines
+        if (shape.length === 4 && type !== 'weight' && type !== 'mask' && tensor.tpSharded && tensor.tpSize > 1) {
+            draw4DTpDepth(group, x, y, w, h, off, shape[0], shape[1], tensor.tpSize);
+        } else if (tensor.tpSharded && tensor.tpSize > 1) {
             drawTpStripes(group, x + w, y, off, h, tensor.tpSize);
-        }
-
-        // 4D depth layer lines (show B × n_h grouping)
-        if (shape.length === 4 && type !== 'weight' && type !== 'mask') {
+        } else if (shape.length === 4 && type !== 'weight' && type !== 'mask') {
             draw4DDepthLines(group, x, y, w, h, off, shape[0], shape[1]);
         }
     }
@@ -206,21 +205,78 @@ function draw4DDepthLines(group, x, y, w, h, off, B, n_h) {
         const ly = off.dy * frac;
 
         const opacity = isBatchBoundary ? 0.6 : 0.25;
-        const strokeW = isBatchBoundary ? 1.5 : 0.75;
+        const strokeW = isBatchBoundary ? 1 : 0.75;
 
-        // Line on top face (horizontal, parallel to front edge)
-        group.append('line')
-            .attr('x1', x + lx).attr('y1', y + ly)
-            .attr('x2', x + w + lx).attr('y2', y + ly)
+        // L-shaped line across top face and down right face, joined at corner
+        group.append('polyline')
+            .attr('points', `${x + lx},${y + ly} ${x + w + lx},${y + ly} ${x + w + lx},${y + h + ly}`)
+            .attr('fill', 'none')
             .attr('stroke', '#fff').attr('stroke-opacity', opacity)
-            .attr('stroke-width', strokeW);
+            .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
+    }
+}
 
-        // Line on right face (vertical, parallel to front edge)
-        group.append('line')
-            .attr('x1', x + w + lx).attr('y1', y + ly)
-            .attr('x2', x + w + lx).attr('y2', y + h + ly)
+// --- Combined 4D + TP depth rendering ---
+
+function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
+    const total = B * n_h;
+    const headsPerRank = n_h / tpSize;
+    const rx = x + w;  // right face x origin
+
+    // Draw TP-colored stripes on right face and top face
+    for (let b = 0; b < B; b++) {
+        for (let r = 0; r < tpSize; r++) {
+            const startSlice = b * n_h + r * headsPerRank;
+            const endSlice = startSlice + headsPerRank;
+            const f0 = startSlice / total;
+            const f1 = endSlice / total;
+            const color = TP_COLORS[r % TP_COLORS.length];
+
+            // Right face stripe
+            group.append('polygon')
+                .attr('points', polyStr([
+                    [rx + off.dx * f0, y + off.dy * f0],
+                    [rx + off.dx * f1, y + off.dy * f1],
+                    [rx + off.dx * f1, y + h + off.dy * f1],
+                    [rx + off.dx * f0, y + h + off.dy * f0],
+                ]))
+                .attr('fill', color)
+                .attr('fill-opacity', 0.5)
+                .attr('stroke', 'none');
+
+            // Top face stripe
+            group.append('polygon')
+                .attr('points', polyStr([
+                    [x + off.dx * f0, y + off.dy * f0],
+                    [x + off.dx * f1, y + off.dy * f1],
+                    [x + w + off.dx * f1, y + off.dy * f1],
+                    [x + w + off.dx * f0, y + off.dy * f0],
+                ]))
+                .attr('fill', color)
+                .attr('fill-opacity', 0.35)
+                .attr('stroke', 'none');
+        }
+    }
+
+    // Boundary lines on both faces
+    for (let i = 1; i < total; i++) {
+        const isBatchBoundary = (i % n_h === 0);
+        const isTpBoundary = (i % headsPerRank === 0);
+        if (!isBatchBoundary && !isTpBoundary) continue;
+
+        const frac = i / total;
+        const lx = off.dx * frac;
+        const ly = off.dy * frac;
+
+        const opacity = isBatchBoundary ? 0.6 : 0.35;
+        const strokeW = isBatchBoundary ? 1 : 0.75;
+
+        // L-shaped line across top face and down right face, joined at corner
+        group.append('polyline')
+            .attr('points', `${x + lx},${y + ly} ${x + w + lx},${y + ly} ${x + w + lx},${y + h + ly}`)
+            .attr('fill', 'none')
             .attr('stroke', '#fff').attr('stroke-opacity', opacity)
-            .attr('stroke-width', strokeW);
+            .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
     }
 }
 
@@ -575,7 +631,7 @@ export function drawOpNode(g, op, onClick) {
 
     group.append('text')
         .attr('class', 'op-label')
-        .attr('x', op._x).attr('y', op._y + 3)
+        .attr('x', op._x).attr('y', op._y + 4)
         .text(opSymbol(op.type));
 
     group.append('text')
@@ -604,7 +660,7 @@ function opColor(type) {
         matmul: '#e74c3c', mask: '#1abc9c', softmax: '#f39c12',
         broadcast: '#3498db', reshape: '#95a5a6',
         compress: '#e67e22', decompress: '#e67e22',
-        rope: '#ff7043',
+        rope: '#ff7043', add: '#3498db',
     };
     return colors[type] || '#95a5a6';
 }
@@ -614,7 +670,7 @@ function opSymbol(type) {
         matmul: '×', mask: '▽', softmax: 'σ',
         broadcast: '⇒', reshape: '↺',
         compress: '↓', decompress: '↑',
-        rope: '⟳',
+        rope: '⟳', add: '+',
     };
     return symbols[type] || '?';
 }
@@ -666,6 +722,7 @@ function lineHitsRect(x1, y1, x2, y2, rect, margin) {
 
 function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
     const COLLISION_MARGIN = 8;
+    let d;
 
     if (graph._tensorRects) {
         const colliders = graph._tensorRects.filter(r => {
@@ -676,26 +733,27 @@ function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
         if (colliders.length > 0) {
             const topBound = Math.min(...colliders.map(r => r.top)) - 20;
             const bottomBound = Math.max(...colliders.map(r => r.bottom)) + 20;
-            // Route toward whichever side the target is closer to
-            const routeY = y2 <= (topBound + bottomBound) / 2 ? topBound : bottomBound;
+            // Route toward the side closest to where the arrow starts
+            const routeY = y1 <= (topBound + bottomBound) / 2 ? topBound : bottomBound;
 
             const dx = x2 - x1;
             const bend = Math.min(dx * 0.2, 30);
-            g.append('path')
-                .attr('class', 'arrow-path')
-                .attr('d', `M${x1},${y1} C${x1 + bend},${y1} ${x1 + bend},${routeY} ${(x1+x2)/2},${routeY} S${x2 - bend},${y2} ${x2},${y2}`)
-                .attr('marker-end', 'url(#arrowhead)');
-            return;
+            d = `M${x1},${y1} C${x1 + bend},${y1} ${x1 + bend},${routeY} ${(x1+x2)/2},${routeY} S${x2 - bend},${y2} ${x2},${y2}`;
         }
     }
 
-    // Standard bezier curve — no collisions
-    const dx = x2 - x1;
-    const cpx = dx * 0.4;
-    g.append('path')
-        .attr('class', 'arrow-path')
-        .attr('d', `M${x1},${y1} C${x1 + cpx},${y1} ${x2 - cpx},${y2} ${x2},${y2}`)
+    if (!d) {
+        const dx = x2 - x1;
+        const cpx = dx * 0.4;
+        d = `M${x1},${y1} C${x1 + cpx},${y1} ${x2 - cpx},${y2} ${x2},${y2}`;
+    }
+
+    const ag = g.append('g').attr('class', 'arrow-group');
+    ag.append('path').attr('class', 'arrow-hit').attr('d', d);
+    const visPath = ag.append('path').attr('class', 'arrow-path').attr('d', d)
         .attr('marker-end', 'url(#arrowhead)');
+    ag.on('mouseenter', () => visPath.attr('marker-end', 'url(#arrowhead-hover)'))
+      .on('mouseleave', () => visPath.attr('marker-end', 'url(#arrowhead)'));
 }
 
 // --- Full render ---

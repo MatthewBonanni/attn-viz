@@ -2,7 +2,7 @@
 
 import { renderGraph, computeSharedStagePositions } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
-import { showDetail, showTensorDetail, hideDetail, refreshDetail } from './details.js';
+import { showDetail, showTensorDetail, hideDetail, refreshDetail } from './details/index.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph,
@@ -192,19 +192,25 @@ function buildSlider(container, key) {
         .attr('class', 'dim-input')
         .attr('type', 'number')
         .attr('min', def.min)
-        .attr('max', (key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max)
+        .attr('max', key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max)
         .attr('step', def.step)
         .attr('value', params[key]);
 
     const rangeInput = group.append('input')
         .attr('type', 'range')
         .attr('min', def.min)
-        .attr('max', (key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max)
+        .attr('max', key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max)
         .attr('step', def.step)
         .attr('value', params[key]);
 
     function onSliderChange(newVal) {
-        params[key] = +newVal;
+        let v = +newVal;
+        // Snap B and tp_size to nearest power of 2
+        if (key === 'B' || key === 'tp_size') {
+            v = Math.pow(2, Math.round(Math.log2(Math.max(1, v))));
+            v = Math.max(def.min, Math.min(key === 'tp_size' ? Math.min(8, params.n_h) : def.max, v));
+        }
+        params[key] = v;
 
         // Switch preset to "Custom" when a model architecture param changes
         if (['n_h', 'd_h', 'n_kv', 'd_c', 'd_r'].includes(key)) {
@@ -218,7 +224,7 @@ function buildSlider(container, key) {
             params.n_kv = Math.min(params.n_kv, params.n_h);
         }
         if (key === 'n_h' && params.tp_size > 1) {
-            if (params.tp_size > params.n_h) params.tp_size = params.n_h;
+            if (params.tp_size > Math.min(8, params.n_h)) params.tp_size = Math.min(8, params.n_h);
         }
 
         numInput.property('value', params[key]);
@@ -235,9 +241,13 @@ function buildSlider(container, key) {
             d3.selectAll('#sliders input[type="range"]').each(function() {
                 const group = this.parentNode;
                 const label = d3.select(group).select('.dim-name').text();
-                if (label.includes('n_kv') || label.includes('TP')) {
+                if (label.includes('n_kv')) {
                     d3.select(this).attr('max', params.n_h);
                     d3.select(group).select('input[type="number"]').attr('max', params.n_h);
+                } else if (label.includes('TP')) {
+                    const tpMax = Math.min(8, params.n_h);
+                    d3.select(this).attr('max', tpMax);
+                    d3.select(group).select('input[type="number"]').attr('max', tpMax);
                 }
             });
         }
@@ -245,7 +255,12 @@ function buildSlider(container, key) {
 
     rangeInput.on('input', function() { onSliderChange(this.value); });
     numInput.on('change', function() {
-        let v = Math.max(def.min, Math.min((key === 'n_kv' || key === 'tp_size') ? params.n_h : def.max, +this.value || def.min));
+        let v = Math.max(def.min, Math.min(key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max, +this.value || def.min));
+        // Snap to power of 2 for B and tp_size
+        if (key === 'B' || key === 'tp_size') {
+            v = Math.pow(2, Math.round(Math.log2(Math.max(1, v))));
+            v = Math.max(def.min, Math.min(key === 'tp_size' ? Math.min(8, params.n_h) : def.max, v));
+        }
         this.value = v;
         onSliderChange(v);
     });
