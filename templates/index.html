@@ -140,7 +140,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
     width: 0; overflow: hidden; transition: width 0.25s ease;
     border-left: 1px solid #2a2d3a; background: #161822; position: relative;
 }
-#detail-panel.visible { width: 420px; }
+#detail-panel.visible { width: 520px; }
 #detail-header {
     display: flex; justify-content: space-between; align-items: center;
     padding: 16px 20px; border-bottom: 1px solid #2a2d3a;
@@ -153,6 +153,8 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 #close-detail:hover { background: #2a2d3a; color: #fff; }
 #detail-body { padding: 20px; overflow-y: auto; max-height: calc(100vh - 60px); }
 #detail-body svg { width: 100%; }
+#detail-body .dim-label { font-size: 12px !important; }
+#detail-body .tensor-label { font-size: 13px !important; }
 #detail-desc { font-size: 12px; color: #aaa; line-height: 1.6; margin-top: 16px; }
 
 /* Tooltip */
@@ -170,10 +172,10 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 
 /* SVG styles */
 .tensor-block { cursor: pointer; }
-.tensor-block:hover polygon, .tensor-block:hover rect { filter: brightness(1.15); }
-.tensor-block.selected { filter: drop-shadow(0 0 3px #fff) drop-shadow(0 0 6px rgba(255,255,255,0.4)); }
+.tensor-block.selected { /* highlight applied via JS */ }
 .op-node { cursor: pointer; }
-.op-node:hover circle, .op-node:hover rect { filter: brightness(1.2); }
+.op-node:not(.selected):hover circle { filter: url(#hover-glow); }
+.op-node.selected circle { filter: url(#selected-glow); }
 .dim-label { font-size: 10px; fill: #999; font-family: 'Inter', system-ui, monospace; }
 .dim-line { stroke: #555; stroke-width: 1; }
 .tensor-label { font-size: 11px; fill: #fff; font-weight: 600; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
@@ -219,7 +221,10 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
         </div>
     </div>
 
-    <h2>Dimensions</h2>
+    <h2>Runtime</h2>
+    <div id="runtime-sliders"></div>
+
+    <h2>Model Architecture</h2>
     <div id="sliders"></div>
     <div id="derived"></div>
     <div id="paged-sliders"></div>
@@ -236,6 +241,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
         <div class="legend-item"><div class="legend-swatch" style="background:#9b59b6"></div>Attention scores</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#1abc9c"></div>Causal mask</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#e67e22"></div>Latent / compressed</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#ff7043"></div>RoPE (positional)</div>
         <div id="how-to-read">
             <details>
                 <summary>How to read this diagram</summary>
@@ -254,6 +260,24 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
             <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto" markerUnits="userSpaceOnUse">
                 <polygon points="0 0, 8 3, 0 6" class="arrow-head"/>
             </marker>
+            <filter id="selected-glow" x="-25%" y="-25%" width="150%" height="150%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+                <feFlood flood-color="#7c8cf8" flood-opacity="0.8" result="color"/>
+                <feComposite in="color" in2="blur" operator="in" result="glow"/>
+                <feMerge>
+                    <feMergeNode in="glow"/>
+                    <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="hover-glow" x="-15%" y="-15%" width="130%" height="130%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+                <feFlood flood-color="#ffffff" flood-opacity="0.35" result="color"/>
+                <feComposite in="color" in2="blur" operator="in" result="glow"/>
+                <feMerge>
+                    <feMergeNode in="glow"/>
+                    <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
         </defs>
     </svg>
 </div>

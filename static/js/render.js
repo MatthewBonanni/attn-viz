@@ -101,6 +101,11 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
         if (tensor.tpSharded && tensor.tpSize > 1) {
             drawTpStripes(group, x + w, y, off, h, tensor.tpSize);
         }
+
+        // 4D depth layer lines (show B × n_h grouping)
+        if (shape.length === 4 && type !== 'weight' && type !== 'mask') {
+            draw4DDepthLines(group, x, y, w, h, off, shape[0], shape[1]);
+        }
     }
 
     // Front face
@@ -181,6 +186,41 @@ function drawTpStripes(group, rx, fy, off, h, tpSize) {
             .attr('fill', TP_COLORS[r % TP_COLORS.length])
             .attr('fill-opacity', 0.5)
             .attr('stroke', 'none');
+    }
+}
+
+// --- 4D depth layer lines (B × n_h grouping) ---
+
+function draw4DDepthLines(group, x, y, w, h, off, B, n_h) {
+    const total = B * n_h;
+    // Skip individual head lines if too many; only show batch boundaries
+    const showHeadLines = total <= 16;
+    const slices = total;
+
+    for (let i = 1; i < slices; i++) {
+        const isBatchBoundary = (i % n_h === 0);
+        if (!showHeadLines && !isBatchBoundary) continue;
+
+        const frac = i / slices;
+        const lx = off.dx * frac;
+        const ly = off.dy * frac;
+
+        const opacity = isBatchBoundary ? 0.6 : 0.25;
+        const strokeW = isBatchBoundary ? 1.5 : 0.75;
+
+        // Line on top face (horizontal, parallel to front edge)
+        group.append('line')
+            .attr('x1', x + lx).attr('y1', y + ly)
+            .attr('x2', x + w + lx).attr('y2', y + ly)
+            .attr('stroke', '#fff').attr('stroke-opacity', opacity)
+            .attr('stroke-width', strokeW);
+
+        // Line on right face (vertical, parallel to front edge)
+        group.append('line')
+            .attr('x1', x + w + lx).attr('y1', y + ly)
+            .attr('x2', x + w + lx).attr('y2', y + h + ly)
+            .attr('stroke', '#fff').attr('stroke-opacity', opacity)
+            .attr('stroke-width', strokeW);
     }
 }
 
@@ -362,9 +402,38 @@ function annotateEdge(group, x1, y1, x2, y2, name, value, position) {
         .text(text);
 }
 
+// --- Shared stage positions (for aligning stacked graphs) ---
+
+export function computeSharedStagePositions(...graphs) {
+    const stageMaxW = {};
+
+    for (const graph of graphs) {
+        const stages = {};
+        for (const t of graph.tensors) {
+            if (!stages[t.stage]) stages[t.stage] = [];
+            stages[t.stage].push(t);
+        }
+        for (const [sk, tensors] of Object.entries(stages)) {
+            const maxW = Math.max(...tensors.map(t => tensorBounds(t.shape).totalW));
+            stageMaxW[sk] = Math.max(stageMaxW[sk] || 0, maxW);
+        }
+    }
+
+    const stageKeys = Object.keys(stageMaxW).map(Number).sort((a, b) => a - b);
+    const positions = {};
+    let xCursor = 50;
+
+    for (const sk of stageKeys) {
+        positions[sk] = { x: xCursor, w: stageMaxW[sk] };
+        xCursor += stageMaxW[sk] + STAGE_GAP;
+    }
+
+    return positions;
+}
+
 // --- Layout ---
 
-export function computeLayout(graph) {
+export function computeLayout(graph, sharedStageX) {
     const stages = {};
     for (const t of graph.tensors) {
         if (!stages[t.stage]) stages[t.stage] = [];
@@ -377,42 +446,72 @@ export function computeLayout(graph) {
     for (const sk of stageKeys) {
         const tensors = stages[sk];
         tensors.sort((a, b) => a.row - b.row);
-        let totalH = 0;
-        for (const t of tensors) {
-            totalH += tensorBounds(t.shape).totalH + ROW_GAP;
-        }
-        totalH -= ROW_GAP;
         stageInfo[sk] = {
             tensors,
-            totalH,
             maxW: Math.max(...tensors.map(t => tensorBounds(t.shape).totalW)),
         };
     }
 
-    const maxTotalH = Math.max(...Object.values(stageInfo).map(s => s.totalH));
-    const centerY = maxTotalH / 2 + 80;
+    // Row-aligned layout: tensors with the same row number share
+    // the same y-position across all stages (grid-based alignment).
+    const rowMaxH = {};
+    for (const t of graph.tensors) {
+        const bounds = tensorBounds(t.shape);
+        rowMaxH[t.row] = Math.max(rowMaxH[t.row] || 0, bounds.totalH);
+    }
+    const rowKeys = Object.keys(rowMaxH).map(Number).sort((a, b) => a - b);
+
+    let totalH = 0;
+    for (const rk of rowKeys) totalH += rowMaxH[rk] + ROW_GAP;
+    totalH -= ROW_GAP;
+
+    const centerY = totalH / 2 + 80;
+    const rowY = {};
+    let rCursor = centerY - totalH / 2;
+    for (const rk of rowKeys) {
+        rowY[rk] = rCursor;
+        rCursor += rowMaxH[rk] + ROW_GAP;
+    }
 
     // Store stage x-ranges for arrow routing
     const stageXRanges = {};
-    let xCursor = 50;
 
-    for (const sk of stageKeys) {
-        const { tensors, totalH, maxW } = stageInfo[sk];
-        const startY = centerY - totalH / 2;
+    if (sharedStageX) {
+        for (const sk of stageKeys) {
+            const { tensors } = stageInfo[sk];
+            const shared = sharedStageX[sk];
+            const stageX = shared.x;
+            const stageW = shared.w;
 
-        let yCursor = startY;
-        for (const t of tensors) {
-            const bounds = tensorBounds(t.shape);
-            const geo = tensorGeometry(t.shape);
-            const off = depthOffset(geo.d);
+            for (const t of tensors) {
+                const bounds = tensorBounds(t.shape);
+                const geo = tensorGeometry(t.shape);
+                const off = depthOffset(geo.d);
 
-            t._layoutX = xCursor + (maxW - bounds.totalW) / 2;
-            t._layoutY = yCursor + Math.abs(off.dy);
-            yCursor += bounds.totalH + ROW_GAP;
+                t._layoutX = stageX + (stageW - bounds.totalW) / 2;
+                t._layoutY = rowY[t.row] + (rowMaxH[t.row] - bounds.totalH) / 2 + Math.abs(off.dy);
+            }
+
+            stageXRanges[sk] = { left: stageX, right: stageX + stageW };
         }
+    } else {
+        let xCursor = 50;
 
-        stageXRanges[sk] = { left: xCursor, right: xCursor + maxW };
-        xCursor += maxW + STAGE_GAP;
+        for (const sk of stageKeys) {
+            const { tensors, maxW } = stageInfo[sk];
+
+            for (const t of tensors) {
+                const bounds = tensorBounds(t.shape);
+                const geo = tensorGeometry(t.shape);
+                const off = depthOffset(geo.d);
+
+                t._layoutX = xCursor + (maxW - bounds.totalW) / 2;
+                t._layoutY = rowY[t.row] + (rowMaxH[t.row] - bounds.totalH) / 2 + Math.abs(off.dy);
+            }
+
+            stageXRanges[sk] = { left: xCursor, right: xCursor + maxW };
+            xCursor += maxW + STAGE_GAP;
+        }
     }
 
     // Position ops between their inputs and outputs
@@ -446,13 +545,14 @@ export function computeLayout(graph) {
         const outLeft = output._layoutX || 0;
         op._x = (inRight + outLeft) / 2;
 
-        const allY = [...inputs, output].map(t => (t._layoutY || 0) + tensorGeometry(t.shape).h / 2);
-        op._y = allY.reduce((a, b) => a + b, 0) / allY.length;
+        // Align op with its output tensor's y-center so linear ops
+        // sit on the same row as their weight and output tensors.
+        op._y = (output._layoutY || 0) + tensorGeometry(output.shape).h / 2;
     }
 
     graph._stageXRanges = stageXRanges;
     graph._centerY = centerY;
-    graph._maxTotalH = maxTotalH;
+    graph._maxTotalH = totalH;
 }
 
 // --- Draw op nodes ---
@@ -504,6 +604,7 @@ function opColor(type) {
         matmul: '#e74c3c', mask: '#1abc9c', softmax: '#f39c12',
         broadcast: '#3498db', reshape: '#95a5a6',
         compress: '#e67e22', decompress: '#e67e22',
+        rope: '#ff7043',
     };
     return colors[type] || '#95a5a6';
 }
@@ -513,6 +614,7 @@ function opSymbol(type) {
         matmul: '×', mask: '▽', softmax: 'σ',
         broadcast: '⇒', reshape: '↺',
         compress: '↓', decompress: '↑',
+        rope: '⟳',
     };
     return symbols[type] || '?';
 }
@@ -598,10 +700,10 @@ function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds) {
 
 // --- Full render ---
 
-export function renderGraph(g, graph, _params, onOpClick, onTensorClick) {
+export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselectScope, sharedStageX) {
     g.selectAll('*').remove();
 
-    computeLayout(graph);
+    computeLayout(graph, sharedStageX);
 
     // Draw arrows first (behind everything)
     drawArrows(g, graph);
@@ -614,12 +716,28 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick) {
 
         block.on('click', (event) => {
             event.stopPropagation();
-            g.selectAll('.tensor-block').classed('selected', false);
-            block.classed('selected', true);
+            const scope = deselectScope || g;
+            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
+            scope.selectAll('.op-node').classed('selected', false);
+            block.classed('selected', true).attr('filter', 'url(#selected-glow)');
             if (onTensorClick) onTensorClick(t);
         });
 
-        block.on('mouseenter', () => {
+        block.on('mouseenter', function() {
+            // Apply hover glow unless already selected
+            if (!d3.select(this).classed('selected')) {
+                d3.select(this).attr('filter', 'url(#hover-glow)');
+            }
+        });
+
+        block.on('mouseleave', function() {
+            // Remove hover glow unless selected
+            if (!d3.select(this).classed('selected')) {
+                d3.select(this).attr('filter', null);
+            }
+        });
+
+        block.on('mouseenter.tooltip', () => {
             const tooltip = d3.select('#tooltip');
             const shapeStr = `[${t.shape.join(', ')}]`;
             const dimStr = t.dimNames ? t.dimNames.map((n, i) => `${n}=${t.shape[i]}`).join(', ') : '';
@@ -630,20 +748,26 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick) {
             tooltip.classed('visible', true);
         });
 
-        block.on('mousemove', (event) => {
+        block.on('mousemove.tooltip', (event) => {
             d3.select('#tooltip')
                 .style('left', (event.clientX + 12) + 'px')
                 .style('top', (event.clientY - 10) + 'px');
         });
 
-        block.on('mouseleave', () => {
+        block.on('mouseleave.tooltip', () => {
             d3.select('#tooltip').classed('visible', false);
         });
     }
 
-    // Draw ops
+    // Draw ops — hover handled via CSS, JS only toggles .selected class
     for (const op of graph.ops) {
         if (op._x == null) continue;
-        drawOpNode(g, op, onOpClick);
+        const opGroup = drawOpNode(g, op, (clickedOp) => {
+            const scope = deselectScope || g;
+            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
+            scope.selectAll('.op-node').classed('selected', false);
+            opGroup.classed('selected', true);
+            if (onOpClick) onOpClick(clickedOp);
+        });
     }
 }
