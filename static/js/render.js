@@ -118,7 +118,6 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             ]))
             .attr('fill', d3.color(color).darker(0.4))
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
-            .attr('stroke-dasharray', type === 'weight' ? '4,2' : 'none')
             .attr('stroke-width', 1);
 
         // Right face
@@ -129,7 +128,6 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             ]))
             .attr('fill', d3.color(color).darker(0.8))
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
-            .attr('stroke-dasharray', type === 'weight' ? '4,2' : 'none')
             .attr('stroke-width', 1);
 
         // Depth face decorations: TP stripes and/or 4D grouping lines
@@ -147,6 +145,12 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
         } else {
             drawMaskFace(group, x, y, w, h, shape, color);
         }
+        group.append('rect')
+            .attr('x', x).attr('y', y)
+            .attr('width', w).attr('height', h)
+            .attr('fill', 'none')
+            .attr('stroke', '#aaa').attr('stroke-width', 1.5)
+            .attr('stroke-dasharray', '4,2');
     } else {
         const frontRect = group.append('rect')
             .attr('x', x).attr('y', y)
@@ -154,8 +158,7 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             .attr('fill', type === 'weight' ? d3.color(color).brighter(0.3) : color)
             .attr('fill-opacity', type === 'weight' ? 0.5 : 0.85);
         if (type === 'weight') {
-            frontRect.attr('stroke', '#aaa').attr('stroke-width', 1.5)
-                .attr('stroke-dasharray', '4,2');
+            frontRect.attr('stroke', '#aaa').attr('stroke-width', 1.5);
         } else if (d === 0) {
             // Only stroke flat (2D) tensors — 3D faces define their own edges
             frontRect.attr('stroke', d3.color(color).darker(0.3))
@@ -1202,7 +1205,9 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
             tooltip.select('.tt-label').text(t.label);
             tooltip.select('.tt-shape').text(`Shape: ${shapeStr}`);
             tooltip.select('.tt-dims').text(dimStr);
-            tooltip.select('.tt-desc').text(t.desc || '');
+            let desc = t.desc || '';
+            if (t.type === 'mask') desc += ' Not explicitly materialized \u2014 applied on-the-fly or fused into the FlashAttention kernel.';
+            tooltip.select('.tt-desc').text(desc);
             tooltip.classed('visible', true);
         });
 

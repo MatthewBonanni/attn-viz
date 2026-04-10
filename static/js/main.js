@@ -962,6 +962,15 @@ function addFlashAttnAnnotations(graph, params) {
     // Remove fused ops
     graph.ops = graph.ops.filter(o => !fusedOpIds.has(o.id));
 
+    // Position FlashAttention op midway between the mask and its output tensor.
+    // This keeps it centered in the attention region regardless of variant,
+    // and naturally aligns both MLA graphs (both resolve to stage 12).
+    const outputTensor = graph.tensors.find(t => t.id === finalOutputId);
+    const maskTensor = graph.tensors.find(t => t.id === 'mask');
+    const flashStage = (outputTensor && maskTensor)
+        ? Math.round((maskTensor.stage + outputTensor.stage) / 2)
+        : undefined;
+
     // Insert fused FlashAttention op
     const fusedOp = {
         id: 'flash_attn',
@@ -969,6 +978,7 @@ function addFlashAttnAnnotations(graph, params) {
         inputs: externalInputs,
         output: finalOutputId,
         label: 'FlashAttn',
+        stage: flashStage,
         desc: `Fused FlashAttention-2 kernel. Q, K, V are tiled into blocks of B_r=${params.block_q} and B_c=${params.block_kv} rows. ` +
               `Each CTA loads one Q tile and iterates over all K/V tiles. Intermediate attention scores and weights stay in SRAM — ` +
               `only the final output O is written back to HBM.`,

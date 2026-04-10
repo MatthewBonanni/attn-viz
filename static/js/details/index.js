@@ -151,6 +151,9 @@ function _renderTensorDetail(tensor, params) {
     d3.select('#detail-title').text(tensor.label);
 
     let descHtml = tensor.desc || '';
+    if (tensor.type === 'mask') {
+        descHtml += ' This mask is never explicitly materialized as a full S\u00d7S matrix in HBM \u2014 it is applied on-the-fly (or fused into the FlashAttention kernel).';
+    }
     const elems = tensorElements(tensor.shape);
     const bytes = tensorBytes(tensor.shape);
     const shapeStr = tensor.shape.join(' × ');
