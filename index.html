@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Self-Attention Visualizer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex; height: 100vh; background: #0f1117; color: #e0e0e0; }
+
+/* Sidebar */
+#controls {
+    width: 280px; padding: 16px; border-right: 1px solid #2a2d3a;
+    background: #161822; display: flex; flex-direction: column; gap: 12px;
+    overflow-y: auto; flex-shrink: 0;
+}
+#controls h1 { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: -0.3px; }
+#controls h2 { font-size: 10px; font-weight: 500; color: #666; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 4px; }
+
+/* Variant tabs */
+#variant-tabs { display: flex; gap: 3px; }
+#variant-tabs button {
+    flex: 1; padding: 7px 2px; border: 1px solid #2a2d3a; background: #1e2030;
+    color: #aaa; font-size: 11px; font-weight: 600; cursor: pointer;
+    border-radius: 5px; transition: all 0.15s;
+}
+#variant-tabs button:hover { background: #252840; color: #ddd; }
+#variant-tabs button.active { background: #3b5bdb; border-color: #3b5bdb; color: #fff; }
+
+/* Variant description */
+#variant-desc {
+    font-size: 11px; line-height: 1.5; color: #888; padding: 8px 0;
+    border-bottom: 1px solid #2a2d3a;
+}
+#variant-desc b { color: #bbb; }
+
+/* MLA sub-variant toggle */
+#mla-mode { display: none; }
+#mla-mode.visible { display: flex; gap: 3px; margin-top: 4px; }
+#mla-mode button {
+    flex: 1; padding: 5px 2px; border: 1px solid #2a2d3a; background: #1e2030;
+    color: #888; font-size: 10px; font-weight: 500; cursor: pointer;
+    border-radius: 4px; transition: all 0.15s;
+}
+#mla-mode button:hover { background: #252840; color: #ccc; }
+#mla-mode button.active { background: #e67e22; border-color: #e67e22; color: #fff; }
+
+/* Preset dropdown */
+#preset-select {
+    width: 100%; padding: 6px 8px; background: #1e2030; border: 1px solid #2a2d3a;
+    color: #bbb; font-size: 11px; border-radius: 5px; cursor: pointer; outline: none;
+}
+#preset-select:focus { border-color: #3b5bdb; }
+
+/* Execution toggles */
+#exec-toggles { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-bottom: 1px solid #2a2d3a; }
+.toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; color: #aaa;
+}
+.toggle-row label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.toggle-switch {
+    position: relative; width: 32px; height: 18px; background: #2a2d3a;
+    border-radius: 9px; cursor: pointer; transition: background 0.2s;
+    flex-shrink: 0;
+}
+.toggle-switch.active { background: #3b5bdb; }
+.toggle-switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; background: #ccc; border-radius: 50%;
+    transition: transform 0.2s;
+}
+.toggle-switch.active::after { transform: translateX(14px); background: #fff; }
+
+/* Sliders */
+.slider-group { margin-bottom: 2px; }
+.slider-group .slider-header {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px; margin-bottom: 3px;
+}
+.slider-group .dim-name { color: #bbb; font-weight: 500; }
+.dim-input {
+    width: 52px; background: #1e2030; border: 1px solid #2a2d3a;
+    color: #7c8cf8; font-size: 11px; text-align: right;
+    border-radius: 4px; padding: 2px 6px; outline: none;
+    font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.dim-input:focus { border-color: #3b5bdb; }
+.slider-group input[type=range] {
+    width: 100%; height: 4px; -webkit-appearance: none; appearance: none;
+    background: #2a2d3a; border-radius: 2px; outline: none;
+}
+.slider-group input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: #5b6abf; cursor: pointer; border: 2px solid #7c8cf8;
+}
+.derived-dim {
+    font-size: 11px; color: #666; padding: 4px 0;
+    border-top: 1px solid #2a2d3a; margin-top: 4px;
+}
+.derived-dim span { color: #7c8cf8; font-weight: 600; }
+
+/* Grouped slider sections */
+#paged-sliders { display: none; }
+#paged-sliders.visible { display: block; }
+.slider-section-label {
+    font-size: 10px; font-weight: 500; color: #666; text-transform: uppercase;
+    letter-spacing: 0.8px; margin-top: 10px; margin-bottom: 4px;
+    padding-top: 6px; border-top: 1px solid #2a2d3a;
+}
+
+/* Seq length inputs for paged attn */
+#seq-lengths { display: none; padding: 6px 0; }
+#seq-lengths.visible { display: block; }
+#seq-lengths .seq-row {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; margin-bottom: 4px; color: #aaa;
+}
+#seq-lengths .seq-row input {
+    width: 44px; background: #1e2030; border: 1px solid #2a2d3a;
+    color: #7c8cf8; font-size: 11px; text-align: right;
+    border-radius: 4px; padding: 2px 4px; outline: none;
+}
+
+/* Legend */
+#legend { margin-top: auto; padding-top: 10px; border-top: 1px solid #2a2d3a; }
+#legend h2 { margin-bottom: 6px; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 10px; margin-bottom: 3px; color: #888; }
+.legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+/* How to read */
+#how-to-read { font-size: 10px; color: #555; line-height: 1.4; padding-top: 8px; border-top: 1px solid #2a2d3a; margin-top: 8px; }
+#how-to-read summary { cursor: pointer; color: #777; font-weight: 500; margin-bottom: 4px; }
+
+/* Main viz area */
+#viz-container { flex: 1; position: relative; overflow: hidden; background: #0f1117; }
+#viz-container svg { width: 100%; height: 100%; }
+
+/* Detail panel */
+#detail-panel {
+    width: 0; overflow: hidden; transition: width 0.25s ease;
+    border-left: 1px solid #2a2d3a; background: #161822; position: relative;
+}
+#detail-panel.visible { width: 520px; }
+#detail-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 20px; border-bottom: 1px solid #2a2d3a;
+}
+#detail-header h3 { font-size: 14px; font-weight: 600; }
+#close-detail {
+    background: none; border: none; color: #888; font-size: 20px;
+    cursor: pointer; padding: 4px 8px; border-radius: 4px;
+}
+#close-detail:hover { background: #2a2d3a; color: #fff; }
+#detail-body { padding: 20px; overflow-y: auto; max-height: calc(100vh - 60px); }
+#detail-body svg { width: 100%; }
+#detail-body .dim-label { font-size: 12px !important; }
+#detail-body .tensor-label { font-size: 13px !important; }
+#detail-desc { font-size: 12px; color: #aaa; line-height: 1.6; margin-top: 16px; }
+
+/* Tooltip */
+#tooltip {
+    position: fixed; background: #1e2030; border: 1px solid #3b5bdb;
+    border-radius: 6px; padding: 8px 12px; font-size: 11px;
+    pointer-events: none; opacity: 0; transition: opacity 0.15s;
+    z-index: 100; max-width: 260px; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+#tooltip.visible { opacity: 1; }
+#tooltip .tt-label { font-weight: 600; color: #fff; margin-bottom: 2px; }
+#tooltip .tt-shape { color: #7c8cf8; }
+#tooltip .tt-dims { color: #888; font-size: 10px; margin-top: 2px; }
+#tooltip .tt-desc { color: #777; font-size: 10px; margin-top: 4px; font-style: italic; }
+
+/* SVG styles */
+.tensor-block { cursor: pointer; }
+.tensor-block.selected { /* highlight applied via JS */ }
+.op-node { cursor: pointer; }
+.op-node:not(.selected):hover circle { filter: url(#hover-glow); }
+.op-node.selected circle { filter: url(#selected-glow); }
+.dim-label { font-size: 10px; fill: #999; font-family: 'Inter', system-ui, monospace; }
+.dim-line { stroke: #555; stroke-width: 1; }
+.tensor-label { font-size: 11px; fill: #fff; font-weight: 600; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
+.op-label { font-size: 14px; fill: #ddd; font-weight: 500; font-family: 'Inter', system-ui, sans-serif; text-anchor: middle; }
+.arrow-group { cursor: pointer; }
+.arrow-hit  { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; }
+.arrow-path { fill: none; stroke: #555; stroke-width: 1.5; pointer-events: none; }
+.arrow-head { fill: #555; pointer-events: none; }
+.arrow-group:hover .arrow-path { stroke: #9ba3ff; stroke-width: 2.5; }
+.arrow-group:hover .arrow-head { fill: #9ba3ff; }
+.badge { font-size: 8px; fill: #fff; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-bg { rx: 3; ry: 3; }
+.stage-label { font-size: 9px; fill: #555; font-weight: 500; text-anchor: middle; font-family: 'Inter', system-ui, sans-serif; }
+
+/* TP rank colors */
+.tp-rank-0 { fill: #e74c3c; }
+.tp-rank-1 { fill: #3498db; }
+.tp-rank-2 { fill: #2ecc71; }
+.tp-rank-3 { fill: #f39c12; }
+.tp-rank-4 { fill: #9b59b6; }
+.tp-rank-5 { fill: #1abc9c; }
+.tp-rank-6 { fill: #e67e22; }
+.tp-rank-7 { fill: #c0392b; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+    <h1>Attention Visualizer</h1>
+
+    <h2>Variant</h2>
+    <div id="variant-tabs"></div>
+    <div id="mla-mode"></div>
+    <div id="variant-desc"></div>
+
+    <h2>Model Preset</h2>
+    <select id="preset-select"></select>
+
+    <div id="exec-toggles">
+        <div class="toggle-row">
+            <label>Paged Attention</label>
+            <div class="toggle-switch" id="toggle-paged"></div>
+        </div>
+    </div>
+
+    <h2>Runtime</h2>
+    <div id="runtime-sliders"></div>
+
+    <h2>Model Architecture</h2>
+    <div id="sliders"></div>
+    <div id="derived"></div>
+    <div id="paged-sliders"></div>
+    <div id="seq-lengths"></div>
+
+    <div id="legend">
+        <h2>Legend</h2>
+        <div class="legend-item"><div class="legend-swatch" style="background:#4a90d9"></div>Activation</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#7b68ee;opacity:0.6"></div>Weight (dashed)</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#e74c3c"></div>Query</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#2ecc71"></div>Key</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#f39c12"></div>Value</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#9b59b6"></div>Attention scores</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#1abc9c"></div>Causal mask</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#e67e22"></div>Latent / compressed</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#ff7043"></div>RoPE (positional)</div>
+        <div id="how-to-read">
+            <details>
+                <summary>How to read this diagram</summary>
+                <p>Each colored block is a tensor. The front face shows key dimensions; depth (stacked behind) shows batch/head dimensions.</p>
+                <p style="margin-top:4px">Circles between tensors are operations. Click any tensor or op for details.</p>
+                <p style="margin-top:4px">Dimension labels on edges show the size of each axis. Dashed blocks are learned weight matrices.</p>
+                <p style="margin-top:4px">Scroll to zoom, drag to pan, double-click to fit.</p>
+            </details>
+        </div>
+    </div>
+</div>
+
+<div id="viz-container">
+    <svg id="main-svg">
+        <defs>
+            <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+                <polygon points="0 0, 8 3, 0 6" class="arrow-head"/>
+            </marker>
+            <marker id="arrowhead-hover" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+                <polygon points="0 0, 8 3, 0 6" fill="#9ba3ff"/>
+            </marker>
+            <filter id="selected-glow" x="-25%" y="-25%" width="150%" height="150%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+                <feFlood flood-color="#7c8cf8" flood-opacity="0.8" result="color"/>
+                <feComposite in="color" in2="blur" operator="in" result="glow"/>
+                <feMerge>
+                    <feMergeNode in="glow"/>
+                    <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="hover-glow" x="-15%" y="-15%" width="130%" height="130%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+                <feFlood flood-color="#ffffff" flood-opacity="0.35" result="color"/>
+                <feComposite in="color" in2="blur" operator="in" result="glow"/>
+                <feMerge>
+                    <feMergeNode in="glow"/>
+                    <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+        </defs>
+    </svg>
+</div>
+
+<div id="detail-panel">
+    <div id="detail-header">
+        <h3 id="detail-title">Operation Detail</h3>
+        <button id="close-detail">&times;</button>
+    </div>
+    <div id="detail-body">
+        <svg id="detail-svg"></svg>
+        <div id="detail-desc"></div>
+    </div>
+</div>
+
+<div id="tooltip">
+    <div class="tt-label"></div>
+    <div class="tt-shape"></div>
+    <div class="tt-dims"></div>
+    <div class="tt-desc"></div>
+</div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script type="module" src="static/js/main.js"></script>
+</body>
+</html>

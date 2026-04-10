@@ -76,6 +76,20 @@ export function mhaGraph(p) {
               desc: `Weighted sum of values: Attn @ V per head → [B, n_h, S_q, ${d_h}], then concat all heads → [B, S_q, D=${D}].` },
             { id: 'out_proj',type: 'matmul',  inputs: ['ctx','W_O'],         output: 'out',      label: 'Linear',
               desc: `Output projection: concat all heads [B, S_q, n_h·d_h] → [B, S_q, D] via Wo. This mixes information across heads.` },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_K','W_V','K_new','V_new','K_new_r','K_r','V'],
+              ops: ['proj_k','proj_v','rope_k','cache_k','cache_v'],
+              desc: `Keys and values are projected from the input (X @ Wk, X @ Wv), RoPE is applied to keys, and both are appended to the KV cache. The cache grows by S_q tokens each step. In MHA, each of n_h=${n_h} heads has its own K and V, so total cache per token = 2 × n_h × d_h = ${2*n_h*d_h}.` },
+            { label: 'ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['scores','mask','attn','ctx'],
+              ops: ['qkt','masking','attn_v'],
+              desc: `Attention scores are computed as Q' @ K'^T / √d_h, giving a [S_q, S] matrix per head. A causal mask sets future positions to -∞, then softmax normalizes each row. The attention-weighted sum of values (Attn @ V) produces per-head context vectors, concatenated across heads.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['W_O','out'],
+              ops: ['out_proj'],
+              desc: `The concatenated context vectors (D=${D}) are projected through Wo back to model dimension.` },
         ]
     };
 }
@@ -157,6 +171,20 @@ export function gqaGraph(p) {
               desc: 'Weighted sum of values.' },
             { id: 'out_proj',  type: 'matmul',    inputs: ['ctx','W_O'],          output: 'out',      label: 'Linear',
               desc: 'Output projection: concat heads → D.' },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_K','W_V','K_g','V_g','K_gr','K_cache','V_cache','K','V'],
+              ops: ['proj_k','proj_v','rope_k','cache_k','cache_v','bcast_k','bcast_v'],
+              desc: `GQA uses n_kv=${n_kv} KV heads instead of n_h=${n_h}, reducing cache to 2 × n_kv × d_h = ${2*n_kv*d_h} per token (${n_h/n_kv}× smaller than MHA). After caching, each KV head is broadcast ${gpc}× to match the query head count. In practice, grouped GEMM avoids materializing the broadcast.` },
+            { label: 'ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['scores','mask','attn','ctx'],
+              ops: ['qkt','masking','attn_v'],
+              desc: `Attention scores are computed as Q' @ K'^T / √d_h, giving a [S_q, S] matrix per head. A causal mask sets future positions to -∞, then softmax normalizes each row. The attention-weighted sum of values (Attn @ V) produces per-head context vectors, concatenated across heads.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['W_O','out'],
+              ops: ['out_proj'],
+              desc: `The concatenated context vectors are projected through Wo back to model dimension D.` },
         ]
     };
 }
@@ -236,6 +264,20 @@ export function mqaGraph(p) {
               desc: 'Weighted sum of values.' },
             { id: 'out_proj',  type: 'matmul',    inputs: ['ctx','W_O'],          output: 'out',        label: 'Linear',
               desc: 'Output projection.' },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_K','W_V','K_1','V_1','K_1r','K_1_cache','V_1_cache','K','V'],
+              ops: ['proj_k','proj_v','rope_k','cache_k','cache_v','bcast_k','bcast_v'],
+              desc: `MQA projects to a single KV head (n_kv=1), so cache per token = 2 × d_h = ${2*d_h} — an ${n_h}× reduction vs MHA. The single K,V pair is broadcast to all ${n_h} query heads. This maximizes memory bandwidth efficiency at the cost of some quality.` },
+            { label: 'ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['scores','mask','attn','ctx'],
+              ops: ['qkt','masking','attn_v'],
+              desc: `Attention scores are computed as Q' @ K'^T / √d_h, giving a [S_q, S] matrix per head. A causal mask sets future positions to -∞, then softmax normalizes each row. All heads see identical K,V but different Q projections, so Attn @ V produces diverse per-head context vectors.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['W_O','out'],
+              ops: ['out_proj'],
+              desc: `The concatenated context vectors are projected through Wo. Despite sharing K,V, each head's different Q creates different attention patterns, so the D=${D}-dim output is still expressive.` },
         ]
     };
 }
@@ -337,6 +379,20 @@ export function mlaUpprojGraph(p) {
               desc: 'Weighted sum of values.' },
             { id: 'out_proj',   type: 'matmul',     inputs: ['ctx','W_O'],       output: 'out',      label: 'Linear',
               desc: 'Output projection → [B, S_q, D].' },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_DKV','W_KR','c_KV_new','k_rp_new','k_r_new','c_KV','k_r','W_UK','W_UV','K','V'],
+              ops: ['compress_kv','rope_k_proj','rope_k','cache_kv','cache_kr','decomp_k','decomp_v'],
+              desc: `MLA compresses KV via a low-rank bottleneck: X @ W↓kv → c_kv (d_c=${d_c}). Only c_kv and a decoupled RoPE key k_r (d_r=${dr}) are cached — total ${d_c + dr} per token vs ${2*n_h*d_h} for MHA. During prefill, c_kv is decompressed back to full K,V via W↑k, W↑v. RoPE is decoupled because it doesn't commute with low-rank compression.` },
+            { label: 'ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['s_content','s_rope','scores','mask','attn','ctx'],
+              ops: ['content_qk','rope_qk','add_scores','masking','attn_v'],
+              desc: `Attention scores are split into content (Q' @ K^T) and positional (q_r' @ k_r'^T) components, then summed. This decomposition lets content attend via decompressed keys while position comes from the decoupled RoPE path. Causal mask + softmax, then Attn @ V produces context vectors.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['W_O','out'],
+              ops: ['out_proj'],
+              desc: `Context vectors are projected through Wo back to model dimension D.` },
         ]
     };
 }
@@ -445,6 +501,20 @@ export function mlaAbsorbedGraph(p) {
               desc: `Decompress context: c_ctx @ W↑v → ctx [B, n_h, S_q, d_h]. Decompression only at the end.` },
             { id: 'out_proj',     type: 'matmul',     inputs: ['ctx','W_O'],         output: 'out',      label: 'Linear',
               desc: 'Output projection → [B, S_q, D].' },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_DKV','W_KR','c_KV_new','k_rp_new','k_r_new','c_KV','k_r'],
+              ops: ['compress_kv','rope_k_proj','rope_k','cache_kv','cache_kr'],
+              desc: `Same compression as the prefill path: X @ W↓kv → c_kv (d_c=${d_c}), plus decoupled RoPE keys k_r (d_r=${dr}). Cache per token = ${d_c + dr}. The key difference in the absorbed path is that c_kv is NOT decompressed — attention operates directly in latent space.` },
+            { label: 'ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['W_QK','W_QR','q_lat','q_rp','q_r','s_content','s_rope','scores','mask','attn','c_ctx','W_UV'],
+              ops: ['absorbed_proj','rope_q_proj','rope_q','content_qk','rope_qk','add_scores','masking','latent_attn_v','decomp_ctx'],
+              desc: `The absorbed path folds W↑q and W↑k into a single W_QK = W↑q^T @ W↑k, computing content scores as c_q @ W_QK @ c_kv^T directly in d_c=${d_c} space. This avoids the expensive decompression to D=${D}. Value decompression (W↑v) is deferred until after the attention-weighted sum, applied once per query position rather than per cached token.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['ctx','W_O','out'],
+              ops: ['out_proj'],
+              desc: `Output projection through Wo. In the absorbed path, the context has already been decompressed from latent space by W↑v in the attention stage.` },
         ]
     };
 }

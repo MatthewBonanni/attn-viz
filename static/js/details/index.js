@@ -9,7 +9,7 @@ import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
 
 // Track currently displayed detail for live refresh
-let _currentDetail = null;  // { type: 'op'|'tensor', id, graphId }
+let _currentDetail = null;  // { type: 'op'|'tensor'|'group', id, graphId }
 
 export function showDetail(op, graph, params) {
     _currentDetail = { type: 'op', id: op.id, graphId: graph.id };
@@ -81,17 +81,39 @@ function _renderTensorDetail(tensor, params) {
     }
 }
 
+export function showGroupDetail(group) {
+    _currentDetail = { type: 'group', id: group.label };
+    _renderGroupDetail(group);
+}
+
+function _renderGroupDetail(group) {
+    const panel = d3.select('#detail-panel');
+    panel.classed('visible', true);
+    d3.select('#detail-title').text(group.label);
+    d3.select('#detail-desc').html(group.desc || '');
+
+    const svg = d3.select('#detail-svg');
+    svg.selectAll('*').remove();
+    svg.attr('height', 0);
+}
+
 export function refreshDetail(graphs, params) {
     if (!_currentDetail) return;
     const panel = d3.select('#detail-panel');
     if (!panel.classed('visible')) return;
 
-    // Find the matching op or tensor in the fresh graphs
+    // Find the matching op, tensor, or group in the fresh graphs
     for (const graph of graphs) {
         if (_currentDetail.type === 'op') {
             const op = graph.ops.find(o => o.id === _currentDetail.id);
             if (op && (!_currentDetail.graphId || graph.id === _currentDetail.graphId)) {
                 _renderOpDetail(op, graph, params);
+                return;
+            }
+        } else if (_currentDetail.type === 'group') {
+            const group = (graph.groups || []).find(gr => gr.label === _currentDetail.id);
+            if (group) {
+                _renderGroupDetail(group);
                 return;
             }
         } else {

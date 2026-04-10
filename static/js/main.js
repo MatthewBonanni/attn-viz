@@ -2,7 +2,7 @@
 
 import { renderGraph, computeSharedStagePositions } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
-import { showDetail, showTensorDetail, hideDetail, refreshDetail } from './details/index.js';
+import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph,
@@ -494,7 +494,9 @@ function update() {
 
     renderGraph(scene, graph, params,
         (op) => showDetail(op, graph, params),
-        (tensor) => showTensorDetail(tensor, params)
+        (tensor) => showTensorDetail(tensor, params),
+        undefined, undefined,
+        (group) => showGroupDetail(group)
     );
 
     refreshDetail([graph], params);
@@ -512,12 +514,14 @@ function renderMlaStacked() {
     // Render prefill path
     const prefillGroup = scene.append('g');
     const onTensorClick = (tensor) => showTensorDetail(tensor, params);
+    const onGroupClick = (group) => showGroupDetail(group);
 
     renderGraph(prefillGroup, upprojGraph, params,
         (op) => showDetail(op, upprojGraph, params),
         onTensorClick,
         scene,
-        sharedStageX
+        sharedStageX,
+        onGroupClick
     );
 
     const bbox1 = prefillGroup.node().getBBox();
@@ -543,7 +547,8 @@ function renderMlaStacked() {
         (op) => showDetail(op, absorbedGraph, params),
         onTensorClick,
         scene,
-        sharedStageX
+        sharedStageX,
+        onGroupClick
     );
 
     const bbox2 = decodeGroup.node().getBBox();
@@ -642,6 +647,8 @@ d3.select('#close-detail').on('click', hideDetail);
 svg.on('click', () => {
     scene.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
     scene.selectAll('.op-node').classed('selected', false);
+    scene.selectAll('.group-enclosure').classed('selected', false)
+        .each(function() { d3.select(this).selectAll('rect,path').filter(function() { return d3.select(this).attr('stroke-dasharray'); }).attr('stroke-opacity', 0.4).attr('stroke-width', 1.5); });
     hideDetail();
 });
 

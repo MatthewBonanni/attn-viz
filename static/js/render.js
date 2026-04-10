@@ -806,9 +806,129 @@ function drawRoutedArrow(g, x1, y1, x2, y2, graph, excludeIds, forceBelow) {
         .attr('points', `${x2},${y2-3} ${x2+ARROWHEAD_LEN},${y2} ${x2},${y2+3}`);
 }
 
+// --- Group enclosures ---
+
+function drawGroupEnclosures(g, graph, onGroupClick, deselectScope) {
+    if (!graph.groups) return;
+
+    const tensorMap = {};
+    for (const t of graph.tensors) tensorMap[t.id] = t;
+    const opMap = {};
+    for (const op of graph.ops) opMap[op.id] = op;
+
+    for (const group of graph.groups) {
+        const memberRects = [];
+
+        // Collect tensor bounding boxes
+        for (const tid of (group.tensors || [])) {
+            const t = tensorMap[tid];
+            if (!t || t._layoutX == null) continue;
+            const b = tensorBounds(t.shape);
+            const geo = tensorGeometry(t.shape);
+            memberRects.push({
+                left: t._layoutX,
+                top: t._layoutY,
+                right: t._layoutX + b.totalW,
+                bottom: t._layoutY + geo.h + DIM_LABEL_OFFSET,
+            });
+        }
+
+        // Collect op bounding boxes
+        for (const oid of (group.ops || [])) {
+            const op = opMap[oid];
+            if (!op || op._x == null) continue;
+            memberRects.push({
+                left: op._x - OP_RADIUS,
+                top: op._y - OP_RADIUS,
+                right: op._x + OP_RADIUS,
+                bottom: op._y + OP_RADIUS,
+            });
+        }
+
+        if (memberRects.length === 0) continue;
+
+        const pad = 10;
+        const extraTop = group.padTop || 0;
+        const x0 = Math.min(...memberRects.map(r => r.left)) - pad - 40;
+        const y0 = Math.min(...memberRects.map(r => r.top)) + 4 - extraTop;
+        const x1 = Math.max(...memberRects.map(r => r.right)) + pad + 40;
+        const y1 = Math.max(...memberRects.map(r => r.bottom)) + pad;
+        const labelH = 14;
+        const color = group.color || '#888';
+
+        const groupG = g.append('g')
+            .attr('class', 'group-enclosure');
+
+        // Visible border
+        const borderEl = groupG.append('rect')
+            .attr('x', x0).attr('y', y0 - labelH)
+            .attr('width', x1 - x0).attr('height', y1 - y0 + labelH)
+            .attr('rx', 8).attr('ry', 8)
+            .attr('fill', 'none')
+            .attr('stroke', color)
+            .attr('stroke-width', 1.5)
+            .attr('stroke-dasharray', '6,4')
+            .attr('stroke-opacity', 0.4);
+
+        // Thick invisible stroke for click/hover hit area on the border
+        groupG.append('rect')
+            .attr('x', x0).attr('y', y0 - labelH)
+            .attr('width', x1 - x0).attr('height', y1 - y0 + labelH)
+            .attr('rx', 8).attr('ry', 8)
+            .attr('fill', 'none')
+            .attr('stroke', 'transparent')
+            .attr('stroke-width', 12)
+            .style('cursor', 'pointer')
+            .style('pointer-events', 'stroke');
+
+        // Label text
+        groupG.append('text')
+            .attr('x', (x0 + x1) / 2).attr('y', y0 - 4)
+            .attr('text-anchor', 'middle')
+            .attr('fill', color)
+            .attr('font-size', '10px')
+            .attr('font-weight', 'bold')
+            .attr('fill-opacity', 0.7)
+            .style('cursor', 'pointer')
+            .text(group.label);
+
+        // Label background hit area
+        groupG.append('rect')
+            .attr('x', x0).attr('y', y0 - labelH)
+            .attr('width', x1 - x0).attr('height', labelH)
+            .attr('fill', 'transparent')
+            .style('cursor', 'pointer');
+
+        groupG.on('mouseenter', function() {
+            borderEl.attr('stroke-opacity', 0.8).attr('stroke-width', 2);
+        });
+        groupG.on('mouseleave', function() {
+            if (!d3.select(this).classed('selected')) {
+                borderEl.attr('stroke-opacity', 0.4).attr('stroke-width', 1.5);
+            }
+        });
+
+        groupG.on('click', (event) => {
+            event.stopPropagation();
+            const scope = deselectScope || g;
+            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
+            scope.selectAll('.op-node').classed('selected', false);
+            scope.selectAll('.group-enclosure').classed('selected', false)
+                .each(function() {
+                    d3.select(this).selectAll('rect,path').filter(function() {
+                        return d3.select(this).attr('stroke-dasharray');
+                    }).attr('stroke-opacity', 0.4).attr('stroke-width', 1.5);
+                });
+            groupG.classed('selected', true);
+            borderEl.attr('stroke-opacity', 0.8).attr('stroke-width', 2);
+            if (onGroupClick) onGroupClick(group);
+        });
+    }
+}
+
 // --- Full render ---
 
-export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselectScope, sharedStageX) {
+export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselectScope, sharedStageX, onGroupClick) {
     g.selectAll('*').remove();
 
     computeLayout(graph, sharedStageX);
@@ -820,33 +940,88 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
     const cacheTensors = graph.tensors.filter(t => t.cache && t._layoutX != null);
     if (cacheTensors.length > 0) {
         const pad = 12;
-        const rects = cacheTensors.map(t => {
+        const cacheRects = cacheTensors.map(t => {
             const b = tensorBounds(t.shape);
             const geo = tensorGeometry(t.shape);
             return { left: t._layoutX, top: t._layoutY - 18, right: t._layoutX + b.totalW, bottom: t._layoutY + geo.h + DIM_LABEL_OFFSET };
         });
-        const x0 = Math.min(...rects.map(r => r.left)) - pad;
-        const y0 = Math.min(...rects.map(r => r.top)) - pad;
-        const x1 = Math.max(...rects.map(r => r.right)) + pad;
-        const y1 = Math.max(...rects.map(r => r.bottom)) + pad;
-        const labelH = 16;
-        g.append('rect')
-            .attr('x', x0).attr('y', y0 - labelH)
-            .attr('width', x1 - x0).attr('height', y1 - y0 + labelH)
+        const cx0 = Math.min(...cacheRects.map(r => r.left)) - pad - 20;
+        const cy0 = Math.min(...cacheRects.map(r => r.top)) - pad;
+        const cx1 = Math.max(...cacheRects.map(r => r.right)) + pad + 40;
+        const cy1 = Math.max(...cacheRects.map(r => r.bottom)) + pad;
+        const cLabelH = 16;
+        const cacheColor = '#16a085';
+
+        const cacheG = g.append('g').attr('class', 'group-enclosure');
+
+        const cacheBorderRect = cacheG.append('rect')
+            .attr('x', cx0).attr('y', cy0 - cLabelH)
+            .attr('width', cx1 - cx0).attr('height', cy1 - cy0 + cLabelH)
             .attr('rx', 8).attr('ry', 8)
             .attr('fill', 'none')
-            .attr('stroke', '#16a085')
+            .attr('stroke', cacheColor)
             .attr('stroke-width', 1.5)
             .attr('stroke-dasharray', '6,4')
             .attr('stroke-opacity', 0.5);
-        g.append('text')
-            .attr('x', (x0 + x1) / 2).attr('y', y0 - 4)
+
+        // Thick invisible stroke hit area on border
+        cacheG.append('rect')
+            .attr('x', cx0).attr('y', cy0 - cLabelH)
+            .attr('width', cx1 - cx0).attr('height', cy1 - cy0 + cLabelH)
+            .attr('rx', 8).attr('ry', 8)
+            .attr('fill', 'none')
+            .attr('stroke', 'transparent')
+            .attr('stroke-width', 12)
+            .style('cursor', 'pointer')
+            .style('pointer-events', 'stroke');
+
+        cacheG.append('text')
+            .attr('x', (cx0 + cx1) / 2).attr('y', cy0 - 4)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#16a085')
+            .attr('fill', cacheColor)
             .attr('font-size', '10px')
             .attr('font-weight', 'bold')
+            .attr('fill-opacity', 0.7)
+            .style('cursor', 'pointer')
             .text('KV CACHE');
+
+        // Label background hit area
+        cacheG.append('rect')
+            .attr('x', cx0).attr('y', cy0 - cLabelH)
+            .attr('width', cx1 - cx0).attr('height', cLabelH)
+            .attr('fill', 'transparent')
+            .style('cursor', 'pointer');
+
+        const cacheDesc = cacheTensors.map(t => `${t.label} ${t.shape.map((d,i) => t.dimNames?.[i] ? t.dimNames[i]+'='+d : d).join('×')}`).join(', ');
+        const kvCacheGroup = {
+            label: 'KV CACHE',
+            desc: `The KV cache stores previously computed keys and values so they don't need to be recomputed at each generation step. Currently holding: ${cacheDesc}. New tokens (S_q) are appended each step; the full S tokens are used as context for attention.`,
+            color: cacheColor,
+        };
+
+        cacheG.on('mouseenter', function() {
+            cacheBorderRect.attr('stroke-opacity', 0.8).attr('stroke-width', 2);
+        });
+        cacheG.on('mouseleave', function() {
+            if (!d3.select(this).classed('selected')) {
+                cacheBorderRect.attr('stroke-opacity', 0.5).attr('stroke-width', 1.5);
+            }
+        });
+        cacheG.on('click', (event) => {
+            event.stopPropagation();
+            const scope = deselectScope || g;
+            scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
+            scope.selectAll('.op-node').classed('selected', false);
+            scope.selectAll('.group-enclosure').classed('selected', false)
+                .each(function() { d3.select(this).selectAll('rect,path').filter(function() { return d3.select(this).attr('stroke-dasharray'); }).attr('stroke-opacity', 0.4).attr('stroke-width', 1.5); });
+            cacheG.classed('selected', true);
+            cacheBorderRect.attr('stroke-opacity', 0.8).attr('stroke-width', 2);
+            if (onGroupClick) onGroupClick(kvCacheGroup);
+        });
     }
+
+    // Draw dashed enclosures around groups
+    drawGroupEnclosures(g, graph, onGroupClick, deselectScope);
 
     // Draw ops before tensors so tensor dim labels aren't hidden behind op circles
     for (const op of graph.ops) {
@@ -855,6 +1030,8 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
             const scope = deselectScope || g;
             scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
             scope.selectAll('.op-node').classed('selected', false);
+            scope.selectAll('.group-enclosure').classed('selected', false)
+                .each(function() { d3.select(this).selectAll('rect,path').filter(function() { return d3.select(this).attr('stroke-dasharray'); }).attr('stroke-opacity', 0.4).attr('stroke-width', 1.5); });
             opGroup.classed('selected', true);
             if (onOpClick) onOpClick(clickedOp);
         });
@@ -871,6 +1048,8 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
             const scope = deselectScope || g;
             scope.selectAll('.tensor-block').classed('selected', false).attr('filter', null);
             scope.selectAll('.op-node').classed('selected', false);
+            scope.selectAll('.group-enclosure').classed('selected', false)
+                .each(function() { d3.select(this).selectAll('rect,path').filter(function() { return d3.select(this).attr('stroke-dasharray'); }).attr('stroke-opacity', 0.4).attr('stroke-width', 1.5); });
             block.classed('selected', true).attr('filter', 'url(#selected-glow)');
             if (onTensorClick) onTensorClick(t);
         });
