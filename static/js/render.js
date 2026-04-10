@@ -785,7 +785,7 @@ function opColor(type) {
         broadcast: '#3498db', reshape: '#95a5a6',
         compress: '#e67e22', decompress: '#e67e22',
         rope: '#ff7043', add: '#3498db',
-        cache: '#16a085',
+        cache: '#16a085', flash_attn: '#ff6b6b',
     };
     return colors[type] || '#95a5a6';
 }
@@ -796,7 +796,7 @@ function opSymbol(type) {
         broadcast: '⧉', reshape: '⧉',
         compress: '↓', decompress: '↑',
         rope: '⟳', add: '+',
-        cache: '⤓',
+        cache: '⤓', flash_attn: '\u26A1',
     };
     return symbols[type] || '?';
 }

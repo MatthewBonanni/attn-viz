@@ -150,6 +150,63 @@ export function computeOpCost(op, tensorMap) {
             return { flops: 0, readBytes: 0, writeBytes: 0, arithmeticIntensity: 0, breakdown: [] };
         }
 
+        case 'flash_attn': {
+            // Fused FlashAttention kernel: QK^T + mask+softmax + Attn@V
+            // Only Q, K, V are read from HBM; only O is written. No intermediate HBM traffic.
+            const Q = inputs.find(t => t && (t.id.startsWith('Q') || t.id === 'q_lat'));
+            const K = inputs.find(t => t && (t.id.startsWith('K') || t.id === 'k_r' || t.id === 'c_KV'));
+            const V = inputs.find(t => t && (t.id.startsWith('V') || t.id === 'c_KV'));
+            if (!Q || !output) return null;
+
+            // Shapes: Q is [B, n_h, S_q, d], K is [B, n_h/1, S, d], V similar
+            const shQ = Q.shape;
+            const B = shQ[0];
+            const n_h = shQ.length >= 3 ? shQ[1] : 1;
+            const S_q = shQ.length >= 4 ? shQ[2] : shQ.length >= 3 ? shQ[1] : shQ[0];
+            const d = shQ[shQ.length - 1];
+
+            // K determines S and inner dim for QK^T
+            const shK = K ? K.shape : shQ;
+            const S = shK.length >= 4 ? shK[2] : shK.length >= 3 ? shK[1] : shK[0];
+            const d_k = shK[shK.length - 1];
+
+            // V may be different tensor (or same as K for absorbed MLA)
+            const actualV = (V && V.id !== K.id) ? V : K;
+            const d_v = actualV.shape[actualV.shape.length - 1];
+
+            // FLOPs: 2*B*n_h*S_q*S*d_k (QK^T) + 5*B*n_h*S_q*S (mask+softmax) + 2*B*n_h*S_q*S*d_v (Attn@V)
+            const flops = B * n_h * S_q * S * (2 * d_k + 5 + 2 * d_v);
+
+            // Memory: read all non-mask inputs from HBM; write O to HBM
+            const maskInput = inputs.find(t => t && t.type === 'mask');
+            const breakdown = [];
+            let readBytes = 0;
+            const counted = new Set();
+            for (const t of inputs) {
+                if (!t || t.type === 'mask' || counted.has(t.id)) continue;
+                counted.add(t.id);
+                const bytes = tensorBytes(t.shape);
+                readBytes += bytes;
+                breakdown.push({ label: `Read ${t.label}`, shape: t.shape, bytes });
+            }
+            if (maskInput) {
+                const maskBytes = tensorElements(maskInput.shape) * 1;
+                readBytes += maskBytes;
+                breakdown.push({ label: `Read ${maskInput.label}`, shape: maskInput.shape, bytes: maskBytes });
+            }
+            const writeBytes = outBytes;
+            breakdown.push({ label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes });
+
+            const totalIO = readBytes + writeBytes;
+            return {
+                flops,
+                readBytes,
+                writeBytes,
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
+                breakdown,
+            };
+        }
+
         case 'cache': {
             // Append to cache: copy S_q new tokens
             const inputBytes = inputs[0] ? tensorBytes(inputs[0].shape) : 0;

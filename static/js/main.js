@@ -67,7 +67,10 @@ for (const [k, v] of Object.entries(SLIDER_DEFS)) {
     params[k] = v.default;
 }
 params.pagedAttn = false;
-params.flashAttn = true;
+params.flashAttn = false;
+params.block_q = 128;
+params.block_kv = 128;
+params.splitKV = false;
 params.seqLens = [8, 9];     // per-request total S (cached + new)
 params.queryLens = [4, 1];   // per-request S_q (new query tokens)
 
@@ -524,10 +527,10 @@ function computeMlaCrossover(params) {
     const g_ab2 = mlaAbsorbedGraph(p2);
     // Apply FlashAttention annotations so SRAM-only tensors are zeroed in cost
     if (params.flashAttn) {
-        addFlashAttnAnnotations(g_up1);
-        addFlashAttnAnnotations(g_up2);
-        addFlashAttnAnnotations(g_ab1);
-        addFlashAttnAnnotations(g_ab2);
+        addFlashAttnAnnotations(g_up1, p1);
+        addFlashAttnAnnotations(g_up2, p2);
+        addFlashAttnAnnotations(g_ab1, p1);
+        addFlashAttnAnnotations(g_ab2, p2);
     }
     const upproj1 = computePipelineTotals(g_up1);
     const upproj2 = computePipelineTotals(g_up2);
@@ -774,7 +777,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
 function annotateGraph(graph) {
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
-    if (params.flashAttn) addFlashAttnAnnotations(graph);
+    if (params.flashAttn) addFlashAttnAnnotations(graph, params);
 }
 
 function update() {
@@ -902,12 +905,87 @@ function addTpAnnotations(graph, params) {
 // Intermediate tensors that stay in SRAM (never materialized in HBM)
 const FLASH_SRAM_TENSORS = new Set(['scores', 'attn', 's_content', 's_rope']);
 
-function addFlashAttnAnnotations(graph) {
-    for (const t of graph.tensors) {
-        if (FLASH_SRAM_TENSORS.has(t.id)) {
-            t.sramOnly = true;
-            t.badge = 'SRAM';
-            t.desc = (t.desc || '') + ' [FlashAttention: not materialized in HBM — computed and consumed in SRAM tiles.]';
+// Ops that get fused into the FlashAttention kernel
+const FLASH_FUSED_OPS_STANDARD = new Set(['qkt', 'masking', 'attn_v']);
+const FLASH_FUSED_OPS_MLA_UPPROJ = new Set(['content_qk', 'rope_qk', 'add_scores', 'masking', 'attn_v']);
+const FLASH_FUSED_OPS_MLA_ABSORBED = new Set(['content_qk', 'rope_qk', 'add_scores', 'masking', 'latent_attn_v']);
+
+function addFlashAttnAnnotations(graph, params) {
+    // Identify which ops to fuse based on what's present in the graph
+    const opIds = new Set(graph.ops.map(o => o.id));
+    let fusedOpIds;
+    if (opIds.has('latent_attn_v')) {
+        fusedOpIds = FLASH_FUSED_OPS_MLA_ABSORBED;
+    } else if (opIds.has('content_qk')) {
+        fusedOpIds = FLASH_FUSED_OPS_MLA_UPPROJ;
+    } else {
+        fusedOpIds = FLASH_FUSED_OPS_STANDARD;
+    }
+
+    // Find the fused ops and extract external inputs/output
+    const fusedOps = graph.ops.filter(o => fusedOpIds.has(o.id));
+    if (fusedOps.length === 0) return;
+
+    // Collect all tensor IDs that are internal to the fused region
+    const fusedOutputIds = new Set(fusedOps.map(o => o.output));
+    const fusedInputIds = new Set(fusedOps.flatMap(o => o.inputs));
+
+    // External inputs: consumed by fused ops but not produced by them
+    const externalInputs = [...fusedInputIds].filter(id => !fusedOutputIds.has(id));
+    // Final output: produced by fused ops but not consumed by any fused op
+    const fusedConsumed = new Set(fusedOps.flatMap(o => o.inputs));
+    const finalOutputId = [...fusedOutputIds].find(id => !fusedConsumed.has(id));
+    // Intermediate tensors: produced AND consumed within fused ops
+    const intermediateTensorIds = new Set([...fusedOutputIds].filter(id => id !== finalOutputId));
+
+    // Determine Q, K, V inputs for the fused op description
+    let qId, kId, vId;
+    const qktOp = fusedOps.find(o => o.id === 'qkt');
+    const contentQkOp = fusedOps.find(o => o.id === 'content_qk');
+    const attnVOp = fusedOps.find(o => o.id === 'attn_v' || o.id === 'latent_attn_v');
+    if (qktOp) {
+        qId = qktOp.inputs[0];
+        kId = qktOp.inputs[1];
+    } else if (contentQkOp) {
+        qId = contentQkOp.inputs[0];
+        kId = contentQkOp.inputs[1];
+    }
+    if (attnVOp) {
+        vId = attnVOp.inputs[1];
+    }
+
+    // Remove intermediate tensors
+    graph.tensors = graph.tensors.filter(t => !intermediateTensorIds.has(t.id));
+
+    // Remove fused ops
+    graph.ops = graph.ops.filter(o => !fusedOpIds.has(o.id));
+
+    // Insert fused FlashAttention op
+    const fusedOp = {
+        id: 'flash_attn',
+        type: 'flash_attn',
+        inputs: externalInputs,
+        output: finalOutputId,
+        label: 'FlashAttn',
+        desc: `Fused FlashAttention-2 kernel. Q, K, V are tiled into blocks of B_r=${params.block_q} and B_c=${params.block_kv} rows. ` +
+              `Each CTA loads one Q tile and iterates over all K/V tiles. Intermediate attention scores and weights stay in SRAM — ` +
+              `only the final output O is written back to HBM.`,
+    };
+    if (contentQkOp && contentQkOp.routeBelow) {
+        fusedOp.routeBelow = contentQkOp.routeBelow;
+    }
+    graph.ops.push(fusedOp);
+
+    // Update ATTENTION group
+    for (const group of (graph.groups || [])) {
+        if (group.tensors) {
+            group.tensors = group.tensors.filter(id => !intermediateTensorIds.has(id));
+        }
+        if (group.ops) {
+            group.ops = group.ops.filter(id => !fusedOpIds.has(id));
+            if (group.label.includes('ATTENTION')) {
+                group.ops.push('flash_attn');
+            }
         }
     }
 }

@@ -7,6 +7,7 @@ import { drawGenericDetail } from './generic.js';
 import { drawPagedCacheDetail } from './cache.js';
 import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
+import { drawFlashAttnDetail } from './flash-attn.js';
 import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
 
 // Track currently displayed detail for live refresh
@@ -17,22 +18,32 @@ export function showDetail(op, graph, params) {
     _renderOpDetail(op, graph, params);
 }
 
-function _shiftStatsOverlay(visible) {
-    d3.select('#stats-overlay').style('right', visible ? '536px' : '16px');
+function _shiftStatsOverlay(visible, wide) {
+    const overlay = d3.select('#stats-overlay');
+    if (wide) {
+        // Flash detail panel is wide enough to cover the overlay — hide it entirely
+        overlay.style('display', 'none');
+    } else {
+        overlay.style('display', null);
+        const offset = '536px';
+        overlay.style('right', visible ? offset : '16px');
+    }
 }
 
 function _renderOpDetail(op, graph, params) {
+    const isFlash = op.type === 'flash_attn';
     const panel = d3.select('#detail-panel');
     panel.classed('visible', true);
-    _shiftStatsOverlay(true);
+    if (!isFlash) d3.select('#detail-body .flash-controls').remove();
+    _shiftStatsOverlay(true, isFlash);
     d3.select('#detail-title').text(op.label);
 
     const tensorMap = {};
     for (const t of graph.tensors) tensorMap[t.id] = t;
 
-    // Build description + cost HTML
+    // Build description + cost HTML (flash_attn shows its own cost in the detail panel)
     let descHtml = op.desc || '';
-    const cost = computeOpCost(op, tensorMap);
+    const cost = isFlash ? null : computeOpCost(op, tensorMap);
     if (cost && (cost.flops > 0 || cost.readBytes > 0)) {
         const threshold = computeRooflineThreshold('H100 SXM');
         const totalBytes = cost.readBytes + cost.writeBytes;
@@ -68,11 +79,16 @@ function _renderOpDetail(op, graph, params) {
     }
     d3.select('#detail-desc').html(descHtml);
 
+    panel.classed('flash-wide', isFlash);
+
     const svg = d3.select('#detail-svg');
     svg.selectAll('*').remove();
     svg.attr('height', 350);
 
     switch (op.type) {
+        case 'flash_attn':
+            drawFlashAttnDetail(svg, op, tensorMap, params);
+            break;
         case 'matmul':
         case 'compress':
         case 'decompress':
@@ -104,7 +120,8 @@ export function showTensorDetail(tensor, params) {
 
 function _renderTensorDetail(tensor, params) {
     const panel = d3.select('#detail-panel');
-    panel.classed('visible', true);
+    panel.classed('visible', true).classed('flash-wide', false);
+    d3.select('#detail-body .flash-controls').remove();
     _shiftStatsOverlay(true);
     d3.select('#detail-title').text(tensor.label);
 
@@ -144,7 +161,8 @@ export function showGroupDetail(group) {
 
 function _renderGroupDetail(group) {
     const panel = d3.select('#detail-panel');
-    panel.classed('visible', true);
+    panel.classed('visible', true).classed('flash-wide', false);
+    d3.select('#detail-body .flash-controls').remove();
     _shiftStatsOverlay(true);
     d3.select('#detail-title').text(group.label);
     d3.select('#detail-desc').html(group.desc || '');
@@ -185,6 +203,7 @@ export function refreshDetail(graphs, params) {
 
 export function hideDetail() {
     _currentDetail = null;
-    d3.select('#detail-panel').classed('visible', false);
+    const panel = d3.select('#detail-panel');
+    panel.classed('visible', false).classed('flash-wide', false);
     _shiftStatsOverlay(false);
 }
