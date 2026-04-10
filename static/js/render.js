@@ -509,8 +509,13 @@ export function computeSharedStagePositions(...graphs) {
             if (!stages[t.stage]) stages[t.stage] = [];
             stages[t.stage].push(t);
         }
+        for (const op of graph.ops) {
+            if (op.stage != null && !stages[op.stage]) stages[op.stage] = [];
+        }
         for (const [sk, tensors] of Object.entries(stages)) {
-            const maxW = Math.max(...tensors.map(t => tensorBounds(t.shape).totalW));
+            const maxW = tensors.length > 0
+                ? Math.max(...tensors.map(t => tensorBounds(t.shape).totalW))
+                : 0;
             stageMaxW[sk] = Math.max(stageMaxW[sk] || 0, maxW);
         }
     }
@@ -519,9 +524,30 @@ export function computeSharedStagePositions(...graphs) {
     const positions = {};
     let xCursor = 50;
 
+    // First pass: lay out tensor stages only
     for (const sk of stageKeys) {
+        if (stageMaxW[sk] === 0) continue;
         positions[sk] = { x: xCursor, w: stageMaxW[sk] };
         xCursor += stageMaxW[sk] + STAGE_GAP;
+    }
+    // Second pass: position tensorless stages by interpolating between neighbors
+    const tensorStages = stageKeys.filter(sk => stageMaxW[sk] > 0);
+    for (const sk of stageKeys) {
+        if (stageMaxW[sk] > 0) continue;
+        const below = tensorStages.filter(s => s < sk);
+        const above = tensorStages.filter(s => s > sk);
+        if (below.length && above.length) {
+            const sB = below[below.length - 1], sA = above[0];
+            const pB = positions[sB], pA = positions[sA];
+            const t = (sk - sB) / (sA - sB);
+            const xB = pB.x + pB.w, xA = pA.x;
+            positions[sk] = { x: xB + t * (xA - xB), w: 0 };
+        } else if (below.length) {
+            const sB = below[below.length - 1];
+            positions[sk] = { x: positions[sB].x + positions[sB].w + STAGE_GAP / 2, w: 0 };
+        } else if (above.length) {
+            positions[sk] = { x: positions[above[0]].x - STAGE_GAP / 2, w: 0 };
+        }
     }
 
     return positions;
@@ -536,6 +562,12 @@ export function computeLayout(graph, sharedStageX) {
         stages[t.stage].push(t);
     }
 
+    for (const op of graph.ops) {
+        if (op.stage != null && !stages[op.stage]) {
+            stages[op.stage] = [];
+        }
+    }
+
     const stageKeys = Object.keys(stages).map(Number).sort((a, b) => a - b);
 
     const stageInfo = {};
@@ -544,7 +576,9 @@ export function computeLayout(graph, sharedStageX) {
         tensors.sort((a, b) => a.row - b.row);
         stageInfo[sk] = {
             tensors,
-            maxW: Math.max(...tensors.map(t => tensorBounds(t.shape).totalW)),
+            maxW: tensors.length > 0
+                ? Math.max(...tensors.map(t => tensorBounds(t.shape).totalW))
+                : 0,
         };
     }
 
@@ -576,6 +610,7 @@ export function computeLayout(graph, sharedStageX) {
         for (const sk of stageKeys) {
             const { tensors } = stageInfo[sk];
             const shared = sharedStageX[sk];
+            if (!shared) continue;
             const stageX = shared.x;
             const stageW = shared.w;
 
@@ -593,8 +628,10 @@ export function computeLayout(graph, sharedStageX) {
     } else {
         let xCursor = 50;
 
+        // First pass: lay out tensor stages
         for (const sk of stageKeys) {
             const { tensors, maxW } = stageInfo[sk];
+            if (maxW === 0) continue;
 
             for (const t of tensors) {
                 const bounds = tensorBounds(t.shape);
@@ -607,6 +644,23 @@ export function computeLayout(graph, sharedStageX) {
 
             stageXRanges[sk] = { left: xCursor, right: xCursor + maxW };
             xCursor += maxW + STAGE_GAP;
+        }
+        // Second pass: interpolate tensorless stages
+        const tStages = stageKeys.filter(sk => stageInfo[sk].maxW > 0);
+        for (const sk of stageKeys) {
+            if (stageInfo[sk].maxW > 0) continue;
+            const below = tStages.filter(s => s < sk);
+            const above = tStages.filter(s => s > sk);
+            if (below.length && above.length) {
+                const sB = below[below.length - 1], sA = above[0];
+                const rB = stageXRanges[sB], rA = stageXRanges[sA];
+                const t = (sk - sB) / (sA - sB);
+                const x = rB.right + t * (rA.left - rB.right);
+                stageXRanges[sk] = { left: x, right: x };
+            } else if (below.length) {
+                const x = stageXRanges[below[below.length - 1]].right + STAGE_GAP / 2;
+                stageXRanges[sk] = { left: x, right: x };
+            }
         }
     }
 
@@ -634,12 +688,17 @@ export function computeLayout(graph, sharedStageX) {
         const output = tensorMap[op.output];
         if (!output || inputs.length === 0) continue;
 
-        const inRight = Math.max(...inputs.map(t => {
-            const b = tensorBounds(t.shape);
-            return (t._layoutX || 0) + b.totalW;
-        }));
-        const outLeft = output._layoutX || 0;
-        op._x = (inRight + outLeft) / 2;
+        if (op.stage != null && stageXRanges[op.stage]) {
+            const range = stageXRanges[op.stage];
+            op._x = (range.left + range.right) / 2;
+        } else {
+            const inRight = Math.max(...inputs.map(t => {
+                const b = tensorBounds(t.shape);
+                return (t._layoutX || 0) + b.totalW;
+            }));
+            const outLeft = output._layoutX || 0;
+            op._x = (inRight + outLeft) / 2;
+        }
 
         // Align op with its output tensor's y-center so linear ops
         // sit on the same row as their weight and output tensors.
@@ -663,6 +722,7 @@ export function computeLayout(graph, sharedStageX) {
     // Left labels use text-anchor:end and extend leftward from the tensor edge,
     // so we must account for the approximate text width of the label.
     for (const op of graph.ops) {
+        if (op.stage != null) continue;  // explicit stage — don't override
         const output = tensorMap[op.output];
         if (!output || output._layoutX == null || op._x == null) continue;
         // Estimate left dim label text width (format: "name=value", ~6px per char at 9px font)
@@ -753,7 +813,7 @@ function opColor(type) {
 function opSymbol(type) {
     const symbols = {
         matmul: '×', mask: '▽', softmax: 'σ',
-        broadcast: '⇒', reshape: '⧉',
+        broadcast: '⧉', reshape: '⧉',
         compress: '↓', decompress: '↑',
         rope: '⟳', add: '+',
         cache: '⤓',

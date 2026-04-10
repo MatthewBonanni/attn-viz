@@ -39,7 +39,7 @@ export function drawBroadcastDetail(svg, op, tensorMap) {
 
     // Center the two blocks with arrow in available width
     // Reshape/view ops need wider gap since input depth label + output left label crowd the arrow
-    const arrowGap = op.type === 'reshape' ? 100 : 50;
+    const arrowGap = 100;
     const totalBlockW = inW + inD * 0.7 + arrowGap + outW + outD * 0.7;
     const inX = Math.max(30, (mid * 2 - totalBlockW) / 2);
     const topPad = Math.max(inD, outD) * 0.4 + 10;
