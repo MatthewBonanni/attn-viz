@@ -66,8 +66,11 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         const typeStr = sq === 1 ? 'decode' : sq >= s ? 'prefill' : sq < 16 ? 'spec decode' : 'extend';
         const cachedTokens = s - sq;
 
-        // Source tensor block
-        const nNewBlocks = Math.ceil(sq / bs);
+        // How many free slots in the last cached block?
+        const freeInLastBlock = cachedTokens > 0 ? (bs - cachedTokens % bs) % bs : 0;
+        const tokensFillingExisting = Math.min(sq, freeInLastBlock);
+        const tokensNeedingNewBlocks = sq - tokensFillingExisting;
+        const nNewBlocks = Math.ceil(tokensNeedingNewBlocks / bs);
 
         // Layout: source tensor on left, arrow in middle, blocks on right
         // Blocks use a grid when there are too many to stack vertically
@@ -77,10 +80,12 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         const arrowW = 78;
 
         // Determine block grid dimensions — fit within available space
-        const maxBlocksRightW = availW - srcW - arrowW - 10;
+        const labelMargin = 55;
+        const maxBlocksRightW = availW - labelMargin - srcW - arrowW - 10;
         const maxBlockCols = Math.max(1, Math.floor(maxBlocksRightW / (blockDrawW + blockGap)));
-        const blockCols = Math.min(maxBlockCols, Math.ceil(nNewBlocks / 4));
-        const blockRowCount = Math.ceil(nNewBlocks / Math.max(blockCols, 1));
+        const displayBlocks = Math.max(1, nNewBlocks); // at least 1 for layout sizing
+        const blockCols = Math.min(maxBlockCols, Math.ceil(displayBlocks / 4));
+        const blockRowCount = Math.ceil(displayBlocks / Math.max(blockCols, 1));
         // Scale block height to fit, with bounds
         const maxSectionH = 200;
         const blockDrawH = Math.max(14, Math.min(36, (maxSectionH - 20) / blockRowCount - blockGap));
@@ -88,12 +93,14 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         const blocksAreaH = blockRowCount * (blockDrawH + blockGap) - blockGap;
 
         // Source tensor height matches block area
-        const srcH = Math.max(40, blocksAreaH);
-        const sectionH = Math.max(srcH, blocksAreaH);
+        const showExistingBlock = cachedTokens > 0;
+        const existingBlockExtra = showExistingBlock ? blockDrawH + blockGap + 14 : 0;
+        const srcH = Math.max(40, blocksAreaH + existingBlockExtra);
+        const sectionH = Math.max(srcH, blocksAreaH + existingBlockExtra);
 
-        // Position: source is pinned left, blocks right — clamp srcX >= 0
+        // Position: source is pinned left, blocks right — leave room for S_q label on left
         const totalSectionW = srcW + arrowW + blocksAreaW;
-        const srcX = Math.max(0, (availW - totalSectionW) / 2);
+        const srcX = Math.max(labelMargin, (availW - totalSectionW) / 2);
 
         // Draw source tensor
         const srcDrawY = y + (sectionH - srcH) / 2;
@@ -104,9 +111,19 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             .attr('stroke', srcColor).attr('stroke-width', 1.5)
             .attr('rx', 3);
 
-        // Block_size slice lines on source (solid white)
+        // Slice lines on source tensor
+        // First line separates tokens filling existing partial block from new-block tokens
+        if (tokensFillingExisting > 0 && tokensNeedingNewBlocks > 0) {
+            const sliceY = srcDrawY + (tokensFillingExisting / sq) * srcH;
+            g.append('line')
+                .attr('x1', srcX).attr('y1', sliceY)
+                .attr('x2', srcX + srcW).attr('y2', sliceY)
+                .attr('stroke', '#f8e45c').attr('stroke-width', 1).attr('stroke-opacity', 0.7)
+                .attr('stroke-dasharray', '3,2');
+        }
+        // Remaining lines separate new blocks
         for (let bi = 1; bi < nNewBlocks; bi++) {
-            const sliceY = srcDrawY + (bi * bs / sq) * srcH;
+            const sliceY = srcDrawY + ((tokensFillingExisting + bi * bs) / sq) * srcH;
             if (sliceY < srcDrawY + srcH - 1) {
                 g.append('line')
                     .attr('x1', srcX).attr('y1', sliceY)
@@ -144,21 +161,80 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             .attr('fill', '#888').attr('font-size', '14px')
             .text('\u2192');
 
-        // Draw resulting blocks — grid layout, vertically centered with source
+        // Draw resulting blocks — laid out top-to-bottom with existing block first
         const blocksX = arrowX + 50;
-        const blocksStartY = y + (sectionH - blocksAreaH) / 2;
+        const totalBlocksH = existingBlockExtra + blocksAreaH;
+        const blocksTopY = y + (sectionH - totalBlocksH) / 2;
+        const blocksStartY = blocksTopY + existingBlockExtra;
+
+        // Show last cached block (partial or full) when there are cached tokens
+        if (showExistingBlock) {
+            const existBlockX = blocksX;
+            const existBlockY = blocksTopY + 10;
+
+            // Connection line from top of source to existing block (only when tokens fill it)
+            if (blockCols === 1 && tokensFillingExisting > 0) {
+                const srcSliceY = srcDrawY + (tokensFillingExisting / 2 / sq) * srcH;
+                g.append('line')
+                    .attr('x1', srcX + srcW).attr('y1', srcSliceY)
+                    .attr('x2', existBlockX).attr('y2', existBlockY + blockDrawH / 2)
+                    .attr('stroke', '#444').attr('stroke-width', 0.5)
+                    .attr('stroke-dasharray', '2,2');
+            }
+
+            // Last cached block — show cached portion + new fill (if any)
+            const cachedInExisting = freeInLastBlock > 0 ? bs - freeInLastBlock : bs;
+            const cachedFrac = cachedInExisting / bs;
+            const newFrac = tokensFillingExisting / bs;
+
+            g.append('rect')
+                .attr('x', existBlockX).attr('y', existBlockY)
+                .attr('width', blockDrawW).attr('height', blockDrawH)
+                .attr('fill', '#1e2030')
+                .attr('stroke', srcColor).attr('stroke-width', 1.5)
+                .attr('stroke-dasharray', '4,2')
+                .attr('rx', 3);
+            // Cached portion
+            g.append('rect')
+                .attr('x', existBlockX + 1).attr('y', existBlockY + 1)
+                .attr('width', (blockDrawW - 2) * cachedFrac).attr('height', blockDrawH - 2)
+                .attr('fill', srcColor).attr('fill-opacity', 0.25)
+                .attr('rx', 2);
+            // New fill portion
+            if (tokensFillingExisting > 0) {
+                g.append('rect')
+                    .attr('x', existBlockX + 1 + (blockDrawW - 2) * cachedFrac).attr('y', existBlockY + 1)
+                    .attr('width', (blockDrawW - 2) * newFrac).attr('height', blockDrawH - 2)
+                    .attr('fill', srcColor).attr('fill-opacity', 0.55)
+                    .attr('stroke', '#fff').attr('stroke-width', 0.5)
+                    .attr('stroke-dasharray', '2,1').attr('stroke-opacity', 0.4)
+                    .attr('rx', 2);
+            }
+            if (blockDrawH >= 14) {
+                g.append('text')
+                    .attr('x', existBlockX + blockDrawW / 2).attr('y', existBlockY + blockDrawH / 2 + 3)
+                    .attr('text-anchor', 'middle')
+                    .attr('fill', '#ddd').attr('font-size', '8px')
+                    .text(tokensFillingExisting > 0 ? `+${tokensFillingExisting}` : 'full');
+            }
+            g.append('text')
+                .attr('x', existBlockX + blockDrawW / 2).attr('y', existBlockY - 4)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#f8e45c').attr('font-size', '8px')
+                .text('existing block');
+        }
 
         for (let bi = 0; bi < nNewBlocks; bi++) {
             const col = bi % blockCols;
             const row = Math.floor(bi / blockCols);
             const bx = blocksX + col * (blockDrawW + blockGap);
             const by = blocksStartY + row * (blockDrawH + blockGap);
-            const tokensInBlock = Math.min(bs, sq - bi * bs);
+            const tokensInBlock = Math.min(bs, tokensNeedingNewBlocks - bi * bs);
             const fillRatio = tokensInBlock / bs;
 
             // Connection line from source slice to block (only for single column)
             if (blockCols === 1) {
-                const srcSliceY = srcDrawY + ((bi + 0.5) * bs / sq) * srcH;
+                const srcSliceY = srcDrawY + ((tokensFillingExisting + (bi + 0.5) * bs) / sq) * srcH;
                 g.append('line')
                     .attr('x1', srcX + srcW).attr('y1', Math.min(srcSliceY, srcDrawY + srcH))
                     .attr('x2', bx).attr('y2', by + blockDrawH / 2)
@@ -191,11 +267,19 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         }
 
         // Label: "new blocks"
-        g.append('text')
-            .attr('x', blocksX + blocksAreaW / 2).attr('y', blocksStartY - 6)
-            .attr('text-anchor', 'middle')
-            .attr('fill', '#888').attr('font-size', '8px')
-            .text(`${nNewBlocks} new block${nNewBlocks !== 1 ? 's' : ''}`);
+        if (nNewBlocks > 0) {
+            g.append('text')
+                .attr('x', blocksX + blocksAreaW / 2).attr('y', blocksStartY - 6)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#888').attr('font-size', '8px')
+                .text(`${nNewBlocks} new block${nNewBlocks !== 1 ? 's' : ''}`);
+        } else if (tokensFillingExisting > 0) {
+            g.append('text')
+                .attr('x', blocksX + blocksAreaW / 2).attr('y', blocksStartY - 6)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#888').attr('font-size', '8px')
+                .text('no new blocks needed');
+        }
 
         y += sectionH + 16;
 
@@ -235,7 +319,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         g.append('text')
             .attr('x', 0).attr('y', y)
             .attr('fill', '#888').attr('font-size', '9px')
-            .text(`S=${s}, S_q=${sq} (${typeStr}), cached=${cachedTokens}, ${nNewBlocks} new block${nNewBlocks !== 1 ? 's' : ''}`);
+            .text(`S=${s}, S_q=${sq} (${typeStr}), cached=${cachedTokens}, ${nNewBlocks} new block${nNewBlocks !== 1 ? 's' : ''}${tokensFillingExisting > 0 ? ` (+${tokensFillingExisting} into existing)` : ''}`);
         y += 16;
 
         // --- Section 2: Full block table for selected request ---
@@ -333,9 +417,10 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         g.append('text')
             .attr('x', 0).attr('y', y)
             .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
-            .text('Physical blocks (non-contiguous in memory)');
+            .text('Logical blocks (non-contiguous in memory)');
         y += 16;
 
+        // Collect all blocks then shuffle to show they're scattered in memory
         const physicalBlocks = [];
         for (let ri = 0; ri < B; ri++) {
             for (let bi = 0; bi < blocksPerSeq[ri]; bi++) {
@@ -345,13 +430,14 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 });
             }
         }
+        // Deterministic shuffle using a simple hash to scatter blocks
         const shuffled = [...physicalBlocks];
         for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = (i * 7 + 3) % (i + 1);
+            const j = ((i * 2654435761) >>> 0) % (i + 1);
             [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
         }
 
-        const physBlockW = Math.min(36, (availW - 20) / Math.max(shuffled.length, 1));
+        const physBlockW = Math.max(18, Math.min(36, (availW - 20) / Math.max(shuffled.length, 1)));
         const physBlockH = 24;
         const physPerRow = Math.floor(availW / (physBlockW + 3)) || 1;
         const physRowW = Math.min(shuffled.length, physPerRow) * (physBlockW + 3) - 3;

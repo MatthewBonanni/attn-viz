@@ -3,7 +3,7 @@
 const ISO_ANGLE = Math.PI / 6;
 const ISO_COS = Math.cos(ISO_ANGLE);
 const ISO_SIN = Math.sin(ISO_ANGLE);
-const DEPTH_SCALE = 0.4;
+const DEPTH_SCALE = ISO_COS;  // match horizontal extent of depth face to width face
 const STAGE_GAP = 130;
 const ROW_GAP = 30;
 const DIM_LABEL_OFFSET = 8;
