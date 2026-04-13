@@ -88,9 +88,12 @@ export function drawRopeDetail(svg, op, tensorMap) {
         .attr('fill', '#aaa').attr('font-size', '12px')
         .text(`d_h = ${d_h} elements:`);
 
-    const cellW = Math.min(28, (svgW - gPad * 2 - 20) / dispDims);
+    const truncated = d_h > dispDims;
+    const ellipsisW = 20;
+    const totalCells = dispDims + (truncated ? 2 : 0);
+    const cellW = Math.min(28, (svgW - gPad * 2 - 20 - (truncated ? ellipsisW : 0)) / totalCells);
     const cellH = 26;
-    const gridX = mid - (dispDims * cellW) / 2;
+    const gridX = mid - (totalCells * cellW + (truncated ? ellipsisW : 0)) / 2;
     const gridY = vecLabelY + 10;
 
     // Draw input vector cells with pair coloring
@@ -115,12 +118,35 @@ export function drawRopeDetail(svg, op, tensorMap) {
             .text(`x${i}`);
     }
 
-    if (d_h > dispDims) {
+    if (truncated) {
+        const ellipsisX = gridX + dispDims * cellW;
         g.append('text').attr('class', 'dim-label')
-            .attr('x', gridX + dispDims * cellW + 6)
+            .attr('x', ellipsisX + ellipsisW / 2)
             .attr('y', gridY + cellH / 2 + 4)
+            .attr('text-anchor', 'middle')
             .attr('fill', '#666')
-            .text(`\u2026${d_h - dispDims}`);
+            .text('\u2026');
+
+        // Draw last pair
+        const lastPairX = ellipsisX + ellipsisW;
+        const lastPairIdx = numPairs - 1;
+        const lastColor = pairColors[lastPairIdx % pairColors.length];
+        for (let j = 0; j < 2; j++) {
+            const cx = lastPairX + j * cellW;
+            const idx = d_h - 2 + j;
+            g.append('rect')
+                .attr('x', cx).attr('y', gridY)
+                .attr('width', cellW - 1).attr('height', cellH)
+                .attr('rx', 2)
+                .attr('fill', lastColor).attr('fill-opacity', 0.5)
+                .attr('stroke', lastColor).attr('stroke-width', 1);
+            g.append('text')
+                .attr('x', cx + cellW / 2).attr('y', gridY + cellH / 2 + 4)
+                .attr('text-anchor', 'middle')
+                .attr('font-size', cellW >= 22 ? '10px' : '8px')
+                .attr('fill', '#fff')
+                .text(`x${idx}`);
+        }
     }
 
     // Draw pair brackets underneath spanning both elements
@@ -132,7 +158,6 @@ export function drawRopeDetail(svg, op, tensorMap) {
         const midBracketX = (x1 + x2) / 2;
         const bH = 10;
 
-        // U-shaped bracket spanning both cells of the pair
         g.append('path')
             .attr('d', `M${x1},${bracketY} L${x1},${bracketY + bH} L${x2},${bracketY + bH} L${x2},${bracketY}`)
             .attr('fill', 'none')
@@ -143,6 +168,27 @@ export function drawRopeDetail(svg, op, tensorMap) {
             .attr('text-anchor', 'middle')
             .attr('font-size', '9px').attr('fill', color)
             .text(`\u03b8${i}`);
+    }
+
+    if (truncated) {
+        const lastPairIdx = numPairs - 1;
+        const lastColor = pairColors[lastPairIdx % pairColors.length];
+        const lastPairX = gridX + dispDims * cellW + ellipsisW;
+        const x1 = lastPairX + 2;
+        const x2 = lastPairX + 2 * cellW - 3;
+        const midBracketX = (x1 + x2) / 2;
+        const bH = 10;
+
+        g.append('path')
+            .attr('d', `M${x1},${bracketY} L${x1},${bracketY + bH} L${x2},${bracketY + bH} L${x2},${bracketY}`)
+            .attr('fill', 'none')
+            .attr('stroke', lastColor).attr('stroke-width', 1.5);
+
+        g.append('text')
+            .attr('x', midBracketX).attr('y', bracketY + bH + 12)
+            .attr('text-anchor', 'middle')
+            .attr('font-size', '9px').attr('fill', lastColor)
+            .text(`\u03b8${lastPairIdx}`);
     }
 
     // --- Part 2: Rotation formula for one pair ---
