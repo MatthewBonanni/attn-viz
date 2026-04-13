@@ -17,7 +17,7 @@ const VARIANTS = [
 ];
 
 const SLIDER_DEFS = {
-    B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 4 },
+    B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 4, logScale: true },
     S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
     S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
@@ -29,6 +29,14 @@ const SLIDER_DEFS = {
     tp_size:{ label: 'TP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
 };
+
+// Find the largest power-of-2 TP size that evenly divides n_h (max 8)
+function maxTpForHeads(n_h) {
+    for (let tp = 8; tp >= 1; tp >>= 1) {
+        if (n_h % tp === 0) return tp;
+    }
+    return 1;
+}
 
 const RUNTIME_SLIDERS = ['B', 'S', 'S_q'];
 
@@ -207,9 +215,9 @@ function buildSlider(container, key) {
     const header = group.append('div').attr('class', 'slider-header');
     header.append('span').attr('class', 'dim-name').text(def.label);
 
-    const isLog2 = key === 'B' || key === 'tp_size';
+    const isLog2 = key === 'tp_size' || key === 'block_size';
     const isLogScale = def.logScale;
-    const effectiveMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+    const effectiveMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
 
     // Log-scale helpers: slider 0–1000 maps to min..max via log interpolation
     const LOG_STEPS = 1000;
@@ -242,7 +250,7 @@ function buildSlider(container, key) {
     function onSliderChange(newVal) {
         let v = +newVal;
         if (isLog2) {
-            const curMax = key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+            const curMax = key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
             v = Math.max(def.min, Math.min(curMax, v));
         }
         params[key] = v;
@@ -259,7 +267,8 @@ function buildSlider(container, key) {
             params.n_kv = Math.min(params.n_kv, params.n_h);
         }
         if (key === 'n_h' && params.tp_size > 1) {
-            if (params.tp_size > Math.min(8, params.n_h)) params.tp_size = Math.min(8, params.n_h);
+            const validTp = maxTpForHeads(params.n_h);
+            if (params.tp_size > validTp) params.tp_size = validTp;
         }
         if (key === 'S_q' && params.S_q > params.S) {
             params.S = params.S_q;
@@ -291,8 +300,8 @@ function buildSlider(container, key) {
                     d3.select(this).attr('max', params.n_h);
                     d3.select(group).select('input[type="number"]').attr('max', params.n_h);
                 } else if (label.includes('TP')) {
-                    const tpMax = Math.min(8, params.n_h);
-                    d3.select(this).attr('max', tpMax);
+                    const tpMax = maxTpForHeads(params.n_h);
+                    d3.select(this).attr('max', Math.log2(tpMax));
                     d3.select(group).select('input[type="number"]').attr('max', tpMax);
                 }
             });
@@ -305,7 +314,7 @@ function buildSlider(container, key) {
         onSliderChange(sliderToVal(+this.value));
     });
     numInput.on('change', function() {
-        const effMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? Math.min(8, params.n_h) : def.max;
+        const effMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
         let v = +this.value || def.min;
         if (isLog2) {
             const prev = params[key];

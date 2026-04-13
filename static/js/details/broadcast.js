@@ -102,17 +102,28 @@ export function drawBroadcastDetail(svg, op, tensorMap) {
             .text(depthLabel);
     }
 
-    // Broadcast dimension annotation
+    // Dimension annotation
     let noteY = blockY + Math.max(inH, outH) + 32;
-    for (let i = 0; i < inShape.length; i++) {
-        if (inShape[i] !== outShape[i]) {
-            const name = outNames[i] || inNames[i] || `dim${i}`;
-            g.append('text').attr('class', 'dim-label')
-                .attr('x', mid).attr('y', noteY)
-                .attr('text-anchor', 'middle').attr('fill', '#7c8cf8')
-                .text(`${name}: ${inShape[i]} \u2192 ${outShape[i]} (repeat ${outShape[i] / inShape[i]}\u00d7)`);
-            noteY += 18;
+    if (op.type === 'broadcast') {
+        // Broadcast: highlight which dimensions are repeated
+        for (let i = 0; i < inShape.length; i++) {
+            if (inShape[i] !== outShape[i]) {
+                const name = outNames[i] || inNames[i] || `dim${i}`;
+                g.append('text').attr('class', 'dim-label')
+                    .attr('x', mid).attr('y', noteY)
+                    .attr('text-anchor', 'middle').attr('fill', '#7c8cf8')
+                    .text(`${name}: ${inShape[i]} \u2192 ${outShape[i]} (repeat ${outShape[i] / inShape[i]}\u00d7)`);
+                noteY += 18;
+            }
         }
+    } else {
+        // Reshape: show shape transformation (shapes are already labeled on blocks)
+        const fmtShape = (sh, names) => '[' + sh.map((v, i) => `${names[i] || '?'}`).join(', ') + ']';
+        g.append('text').attr('class', 'dim-label')
+            .attr('x', mid).attr('y', noteY)
+            .attr('text-anchor', 'middle').attr('fill', '#888')
+            .text(`${fmtShape(inShape, inNames)} \u2192 ${fmtShape(outShape, outNames)}`);
+        noteY += 18;
     }
 
     svg.attr('height', noteY + 10);
