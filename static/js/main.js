@@ -30,6 +30,20 @@ const SLIDER_DEFS = {
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
 };
 
+// Find the divisor of n that is closest to target
+function nearestDivisor(n, target) {
+    target = Math.max(1, Math.min(n, target));
+    let best = 1;
+    for (let d = 1; d * d <= n; d++) {
+        if (n % d === 0) {
+            if (Math.abs(d - target) < Math.abs(best - target)) best = d;
+            const comp = n / d;
+            if (Math.abs(comp - target) < Math.abs(best - target)) best = comp;
+        }
+    }
+    return best;
+}
+
 // Find the largest power-of-2 TP size that evenly divides n_h (max 8)
 function maxTpForHeads(n_h) {
     for (let tp = 8; tp >= 1; tp >>= 1) {
@@ -217,7 +231,7 @@ function buildSlider(container, key) {
 
     const isLog2 = key === 'tp_size' || key === 'block_size';
     const isLogScale = def.logScale;
-    const effectiveMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
+    const effectiveMax = key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
 
     // Log-scale helpers: slider 0–1000 maps to min..max via log interpolation
     const LOG_STEPS = 1000;
@@ -253,6 +267,10 @@ function buildSlider(container, key) {
             const curMax = key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
             v = Math.max(def.min, Math.min(curMax, v));
         }
+        // Snap n_h to multiples of 4 (with 1 as a special case)
+        if (key === 'n_h') {
+            v = v <= 2 ? 1 : Math.round(v / 4) * 4;
+        }
         params[key] = v;
 
         // Switch preset to "Custom" when a model architecture param changes
@@ -260,11 +278,18 @@ function buildSlider(container, key) {
             d3.select('#preset-select').property('value', '0');
         }
 
-        if (key === 'n_h' && currentVariant === 'gqa') {
-            if (params.n_kv > params.n_h) params.n_kv = params.n_h;
+        if (key === 'n_kv' && currentVariant === 'gqa') {
+            // Drag n_h up if n_kv exceeds it
+            if (params.n_kv > params.n_h) {
+                params.n_h = params.n_kv <= 2 ? 1 : Math.ceil(params.n_kv / 4) * 4;
+                if (params.n_h < params.n_kv) params.n_h = params.n_kv;
+            }
+            params.n_kv = nearestDivisor(params.n_h, params.n_kv);
         }
-        if (key === 'n_kv') {
+        if (key === 'n_h' && currentVariant === 'gqa') {
+            // Drag n_kv down if it exceeds n_h, then snap to nearest divisor
             params.n_kv = Math.min(params.n_kv, params.n_h);
+            params.n_kv = nearestDivisor(params.n_h, params.n_kv);
         }
         if (key === 'n_h' && params.tp_size > 1) {
             const validTp = maxTpForHeads(params.n_h);
@@ -291,18 +316,22 @@ function buildSlider(container, key) {
         updateDerived();
         update();
 
-        // Update dependent slider maxes when their constraint changes (don't rebuild — that kills the drag)
-        if (key === 'n_h') {
-            d3.selectAll('#sliders input[type="range"]').each(function() {
-                const group = this.parentNode;
-                const label = d3.select(group).select('.dim-name').text();
+        // Update dependent slider UIs when their constraint or value changes
+        if (key === 'n_h' || key === 'n_kv') {
+            d3.selectAll('#sliders .slider-group').each(function() {
+                const label = d3.select(this).select('.dim-name').text();
+                const range = d3.select(this).select('input[type="range"]');
+                const num = d3.select(this).select('input[type="number"]');
                 if (label.includes('n_kv')) {
-                    d3.select(this).attr('max', params.n_h);
-                    d3.select(group).select('input[type="number"]').attr('max', params.n_h);
+                    range.property('value', params.n_kv);
+                    num.property('value', params.n_kv);
+                } else if (label.includes('n_h') && label.includes('heads')) {
+                    range.property('value', params.n_h);
+                    num.property('value', params.n_h);
                 } else if (label.includes('TP')) {
                     const tpMax = maxTpForHeads(params.n_h);
-                    d3.select(this).attr('max', Math.log2(tpMax));
-                    d3.select(group).select('input[type="number"]').attr('max', tpMax);
+                    range.attr('max', Math.log2(tpMax));
+                    num.attr('max', tpMax);
                 }
             });
         }
@@ -314,7 +343,7 @@ function buildSlider(container, key) {
         onSliderChange(sliderToVal(+this.value));
     });
     numInput.on('change', function() {
-        const effMax = key === 'n_kv' ? params.n_h : key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
+        const effMax = key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
         let v = +this.value || def.min;
         if (isLog2) {
             const prev = params[key];
@@ -354,6 +383,14 @@ function buildSliders() {
     const dimContainer = d3.select('#sliders');
     dimContainer.selectAll('*').remove();
     for (const key of VARIANT_SLIDERS[currentVariant]) {
+        if (currentVariant === 'gqa' && key === 'n_h') {
+            // Render n_h and n_kv side by side
+            const pair = dimContainer.append('div').attr('class', 'slider-pair');
+            buildSlider(pair, 'n_h');
+            buildSlider(pair, 'n_kv');
+            continue;
+        }
+        if (currentVariant === 'gqa' && key === 'n_kv') continue; // already built above
         buildSlider(dimContainer, key);
     }
 
