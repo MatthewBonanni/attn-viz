@@ -1250,3 +1250,97 @@ update();
 setTimeout(fitToView, 100);
 
 window.addEventListener('resize', () => fitToView());
+
+// --- Glossary ---
+
+const GLOSSARY = [
+    { section: 'Attention Variants', entries: [
+        { term: 'MHA', aka: 'Multi-Head Attention', def: 'The standard attention mechanism used in the original transformer. Each head has its own independent Q, K, and V projections.' },
+        { term: 'GQA', aka: 'Grouped-Query Attention', def: 'A variant where multiple query heads share a single key/value head, reducing KV cache memory. Used in Llama, Mistral, Qwen, and others.' },
+        { term: 'MQA', aka: 'Multi-Query Attention', def: 'The extreme case of GQA where all query heads share a single key/value head. Used in StarCoder and Falcon.' },
+        { term: 'MLA', aka: 'Multi-Head Latent Attention', def: 'A variant (from DeepSeek) that compresses keys and values into a low-rank latent space, reducing cache size. Uses separate pipelines for prefill and decode.' },
+    ]},
+    { section: 'Dimensions', entries: [
+        { term: 'B', def: 'Batch size — the number of independent requests being processed together.' },
+        { term: 'S', aka: 'Sequence length', def: 'Total number of tokens in a request\'s context (both cached and new).' },
+        { term: 'S_q', aka: 'Query length', def: 'Number of new tokens being processed in this forward pass. During prefill S_q = S; during decode S_q = 1.' },
+        { term: 'n_h', aka: 'Number of heads', def: 'How many parallel attention heads the model uses. Each head attends independently, then results are concatenated.' },
+        { term: 'n_kv', aka: 'Number of KV heads', def: 'Number of key/value head groups (in GQA). Multiple query heads share each KV head. When n_kv = n_h, it\'s MHA; when n_kv = 1, it\'s MQA.' },
+        { term: 'd_h', aka: 'Head dimension', def: 'The dimensionality of each attention head. Q, K, and V vectors within a head have this size.' },
+        { term: 'D', aka: 'Model dimension', def: 'The full hidden dimension of the model, equal to n_h \u00d7 d_h. This is the width of the residual stream.' },
+        { term: 'd_c', def: 'KV latent dimension in MLA. The compressed representation size for keys and values.' },
+        { term: 'd_q', def: 'Q latent dimension in MLA. The compressed representation size for queries.' },
+        { term: 'd_r', def: 'RoPE dimension in MLA. The portion of each head dedicated to rotary position embeddings.' },
+    ]},
+    { section: 'Tensors & Operations', entries: [
+        { term: 'Q / K / V', aka: 'Query / Key / Value', def: 'The three projections of the input. Queries ask "what am I looking for?", keys say "what do I contain?", and values carry the actual information to aggregate.' },
+        { term: 'QK^T', def: 'The dot product of queries and keys, producing attention scores. Measures how much each query should attend to each key position.' },
+        { term: 'Softmax', def: 'Normalizes attention scores into a probability distribution, so they sum to 1 across key positions.' },
+        { term: 'Causal mask', def: 'Prevents tokens from attending to future positions by setting those scores to negative infinity before softmax.' },
+        { term: 'W_Q / W_K / W_V / W_O', def: 'Learned weight matrices that project the input into Q, K, V spaces, and project the attention output back to model dimension.' },
+    ]},
+    { section: 'Optimizations', entries: [
+        { term: 'FlashAttention', def: 'An algorithm that computes exact attention without materializing the full S \u00d7 S attention matrix. It tiles the computation into blocks that fit in GPU SRAM, dramatically reducing memory usage.' },
+        { term: 'PagedAttention', def: 'A memory management technique (from vLLM) that stores the KV cache in fixed-size blocks rather than contiguous memory, reducing fragmentation and enabling efficient batching.' },
+        { term: 'RoPE', aka: 'Rotary Position Embeddings', def: 'A method for encoding token position by rotating Q and K vectors. Encodes relative position information directly into the attention computation.' },
+        { term: 'Tensor Parallelism', aka: 'TP', def: 'Splits attention heads across multiple GPUs. Each GPU computes a subset of heads, then results are combined with an all-reduce operation.' },
+        { term: 'KV cache', def: 'Stores previously computed key and value tensors so they don\'t need to be recomputed for each new token during autoregressive generation.' },
+    ]},
+    { section: 'Performance', entries: [
+        { term: 'FLOPs', aka: 'Floating-point operations', def: 'A measure of computational cost. More FLOPs means more arithmetic the GPU must perform.' },
+        { term: 'Memory transfer', def: 'The amount of data moved between GPU global memory (HBM) and compute units. Often the bottleneck for attention.' },
+        { term: 'Arithmetic intensity', def: 'The ratio of FLOPs to bytes transferred. Low arithmetic intensity means the operation is bottlenecked by memory bandwidth, not compute.' },
+        { term: 'Roofline model', def: 'A performance model that determines whether an operation is limited by compute (FLOP/s) or memory bandwidth, based on its arithmetic intensity.' },
+        { term: 'Prefill', def: 'The phase where the model processes all input tokens at once (S_q = S). Typically compute-bound due to large matrix multiplications.' },
+        { term: 'Decode', def: 'The phase where the model generates one token at a time (S_q = 1). Typically memory-bound because the KV cache must be read for each token.' },
+    ]},
+];
+
+function buildGlossary() {
+    const body = d3.select('#glossary-body');
+    body.selectAll('*').remove();
+
+    for (const section of GLOSSARY) {
+        const sec = body.append('div').attr('class', 'glossary-section');
+        sec.append('h4').text(section.section);
+        for (const e of section.entries) {
+            const entry = sec.append('div').attr('class', 'glossary-entry');
+            let termText = e.term;
+            if (e.aka) termText += ` (${e.aka})`;
+            entry.append('span').attr('class', 'glossary-term').text(termText);
+            entry.append('span').attr('class', 'glossary-def').text(` — ${e.def}`);
+        }
+    }
+}
+
+d3.select('#glossary-btn').on('click', () => {
+    buildGlossary();
+    d3.select('#glossary-overlay').classed('visible', true);
+    d3.select('#glossary-search').node().value = '';
+    d3.select('#glossary-search').node().focus();
+});
+
+d3.select('#glossary-close').on('click', () => {
+    d3.select('#glossary-overlay').classed('visible', false);
+});
+
+d3.select('#glossary-overlay').on('click', function(event) {
+    if (event.target === this) d3.select(this).classed('visible', false);
+});
+
+d3.select('#glossary-search').on('input', function() {
+    const q = this.value.toLowerCase();
+    d3.selectAll('.glossary-entry').each(function() {
+        const text = this.textContent.toLowerCase();
+        d3.select(this).classed('hidden', q && !text.includes(q));
+    });
+    // Hide section headers if all entries are hidden
+    d3.selectAll('.glossary-section').each(function() {
+        const visible = d3.select(this).selectAll('.glossary-entry:not(.hidden)').size();
+        d3.select(this).classed('hidden', visible === 0);
+    });
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') d3.select('#glossary-overlay').classed('visible', false);
+});

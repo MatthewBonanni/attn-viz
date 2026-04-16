@@ -219,6 +219,57 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 .badge-bg { rx: 3; ry: 3; }
 .stage-label { font-size: 9px; fill: #555; font-weight: 500; text-anchor: middle; font-family: 'Inter', system-ui, sans-serif; }
 
+/* Glossary button */
+#glossary-btn {
+    position: absolute; bottom: 16px; left: 16px; z-index: 100;
+    background: #1e2030; border: 1px solid #2a2d3a; color: #888;
+    font-size: 11px; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+    font-weight: 500; transition: all 0.15s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+#glossary-btn:hover { background: #252840; color: #bbb; border-color: #3b5bdb; }
+
+/* Glossary modal */
+#glossary-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 500; align-items: center; justify-content: center;
+}
+#glossary-overlay.visible { display: flex; }
+#glossary-modal {
+    background: #161822; border: 1px solid #2a2d3a; border-radius: 10px;
+    width: 560px; max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+#glossary-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid #2a2d3a;
+}
+#glossary-header h3 { font-size: 14px; font-weight: 600; color: #fff; white-space: nowrap; }
+#glossary-search {
+    flex: 1; background: #1e2030; border: 1px solid #2a2d3a; color: #e0e0e0;
+    font-size: 12px; padding: 5px 10px; border-radius: 5px; outline: none;
+}
+#glossary-search:focus { border-color: #3b5bdb; }
+#glossary-close {
+    background: none; border: none; color: #888; font-size: 20px;
+    cursor: pointer; padding: 2px 6px; border-radius: 4px;
+}
+#glossary-close:hover { background: #2a2d3a; color: #fff; }
+#glossary-body {
+    padding: 14px 18px; overflow-y: auto; font-size: 12px; line-height: 1.6;
+}
+.glossary-section { margin-bottom: 14px; }
+.glossary-section h4 {
+    font-size: 10px; font-weight: 500; color: #666; text-transform: uppercase;
+    letter-spacing: 0.8px; margin-bottom: 6px; padding-bottom: 4px;
+    border-bottom: 1px solid #2a2d3a;
+}
+.glossary-entry { margin-bottom: 6px; }
+.glossary-entry.hidden { display: none; }
+.glossary-section.hidden { display: none; }
+.glossary-term { color: #7c8cf8; font-weight: 600; }
+.glossary-def { color: #aaa; }
+
 /* TP rank colors */
 .tp-rank-0 { fill: #e74c3c; }
 .tp-rank-1 { fill: #3498db; }
@@ -288,7 +339,20 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
     <div style="margin-top:auto;padding-top:12px;font-size:10px;color:#555;text-align:center">&copy; 2026 Matthew Bonanni</div>
 </div>
 
+<!-- Glossary modal -->
+<div id="glossary-overlay">
+    <div id="glossary-modal">
+        <div id="glossary-header">
+            <h3>Glossary</h3>
+            <input type="text" id="glossary-search" placeholder="Search terms...">
+            <button id="glossary-close">&times;</button>
+        </div>
+        <div id="glossary-body"></div>
+    </div>
+</div>
+
 <div id="viz-container">
+    <button id="glossary-btn">Glossary</button>
     <svg id="main-svg">
         <defs>
             <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto" markerUnits="userSpaceOnUse">
