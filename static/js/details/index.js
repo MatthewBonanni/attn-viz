@@ -1,6 +1,6 @@
 // index.js — Detail panel entry point: routing and state management
 import { drawMatmulDetail } from './matmul.js';
-import { drawMaskDetail, drawMaskTensorDetail, drawPagedMaskTensorDetail } from './mask.js';
+import { drawMaskDetail, drawMaskTensorDetail } from './mask.js';
 import { drawPagedMaskDetail } from './paged-mask.js';
 import { drawBroadcastDetail } from './broadcast.js';
 import { drawGenericDetail } from './generic.js';
@@ -167,9 +167,6 @@ function _renderTensorDetail(tensor, params) {
     if (tensor.badge === 'PAGED' && params.pagedAttn) {
         svg.attr('height', 400);
         drawPagedCacheDetail(svg, tensor, params);
-    } else if (tensor.type === 'mask' && tensor.multiRequest) {
-        svg.attr('height', 350);
-        drawPagedMaskTensorDetail(svg, tensor, params);
     } else if (tensor.type === 'mask') {
         svg.attr('height', 350);
         drawMaskTensorDetail(svg, tensor, params);
