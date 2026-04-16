@@ -113,7 +113,7 @@ function _renderOpDetail(op, graph, params) {
         case 'matmul':
         case 'compress':
         case 'decompress':
-            drawMatmulDetail(svg, op, tensorMap);
+            drawMatmulDetail(svg, op, tensorMap, params);
             break;
         case 'mask':
             drawMaskDetail(svg, op, tensorMap, params);

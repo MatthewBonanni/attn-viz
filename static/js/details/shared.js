@@ -1,19 +1,12 @@
 // shared.js — Shared utilities and helpers for detail panel visualizations
-import { TP_COLORS } from '../render.js';
-export { TP_COLORS };
+import { TP_COLORS, RANK_COLORS } from '../render.js';
+export { TP_COLORS, RANK_COLORS };
 
-// Get available detail SVG width and center x, accounting for padding/margins
 export function detailMetrics() {
-    // Use a fixed width rather than clientWidth — the panel may still be
-    // CSS-transitioning from width:0 to width:520px on first open, so
-    // clientWidth can return an intermediate value causing content to
-    // render at the wrong size.
     const w = 480;
     return { w, cx: w / 2, pad: 20 };
 }
 
-// Compute cell size, label density, and whether to use schematic mode for a mask grid.
-// In schematic mode the grid fits the panel but individual cells are replaced by shapes.
 const MAX_DETAIL_CELLS = 10000;
 
 export function maskLayout(svgW, rows, cols) {
@@ -21,7 +14,6 @@ export function maskLayout(svgW, rows, cols) {
     const maxGridH = 300;
     const rawCellSize = Math.min(28, maxGridW / cols, maxGridH / rows);
     const schematic = rawCellSize < 2 || rows * cols > MAX_DETAIL_CELLS;
-    // In schematic mode, shrink cells so the grid fits; otherwise floor at 2px
     const cellSize = schematic ? Math.min(maxGridW / cols, maxGridH / rows) : rawCellSize;
 
     let labelEvery;
@@ -46,9 +38,71 @@ export function drawDetailBlock(g, x, y, w, h, color, label) {
         .text(label);
 }
 
-export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpInfo) {
+export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpInfo, dpInfo, onCellClick) {
     const dx = d * 0.7;
     const dy = -d * 0.4;
+
+    const tpSize = (tpInfo && tpInfo.tpSize > 1) ? tpInfo.tpSize : 1;
+    const dpSize = (dpInfo && dpInfo.dpSize > 1) ? dpInfo.dpSize : 1;
+    const dpFracs = (dpInfo && dpInfo.dpFracs) || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
+    const hasParallelism = tpSize > 1 || dpSize > 1;
+
+    // Element registry for edge-aware 3D highlighting.
+    const elements = [];
+    for (let dp = 0; dp < dpSize; dp++) {
+        elements[dp] = [];
+        for (let tp = 0; tp < tpSize; tp++) {
+            elements[dp][tp] = { front: [], right: [], top: [] };
+        }
+    }
+
+    const restoreOps = { front: [0.4, 'none', 0], right: [0.5, 'none', 0], top: [0.35, 'none', 0] };
+    const highlightOps = { front: [0.65, '#fff', 1.5], right: [0.85, '#fff', 1.5], top: [0.55, '#fff', 1] };
+
+    function setFace(face, dp, tp, on) {
+        const [opacity, stroke, sw] = on ? highlightOps[face] : restoreOps[face];
+        for (const el of elements[dp][tp][face]) {
+            el.attr('fill-opacity', opacity);
+            if (stroke === 'none') el.attr('stroke', 'none');
+            else el.attr('stroke', stroke).attr('stroke-width', sw);
+        }
+    }
+
+    function clearAll() {
+        for (let dp = 0; dp < dpSize; dp++)
+            for (let tp = 0; tp < tpSize; tp++)
+                for (const face of ['front', 'right', 'top'])
+                    setFace(face, dp, tp, false);
+    }
+
+    function highlightRightCell(dp, tp) {
+        clearAll();
+        setFace('right', dp, tp, true);
+        if (tp === 0 && tpSize > 1) {
+            for (let t = 0; t < tpSize; t++) setFace('front', dp, t, true);
+        }
+        if (dp === 0 && tpSize > 1) {
+            for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, tp, true);
+        }
+    }
+
+    function highlightFrontStripe(dp) {
+        clearAll();
+        for (let t = 0; t < tpSize; t++) setFace('front', dp, t, true);
+        setFace('right', dp, 0, true);
+        if (dp === 0 && tpSize > 1) {
+            for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, 0, true);
+        }
+    }
+
+    function highlightTopBand(tp) {
+        clearAll();
+        for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, tp, true);
+        setFace('right', 0, tp, true);
+        if (tp === 0 && tpSize > 1) {
+            for (let t = 0; t < tpSize; t++) setFace('front', 0, t, true);
+        }
+    }
 
     // Top face base
     g.append('polygon')
@@ -59,56 +113,79 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         .attr('points', `${x+w},${y} ${x+w+dx},${y+dy} ${x+w+dx},${y+h+dy} ${x+w},${y+h}`)
         .attr('fill', d3.color(color).darker(0.8)).attr('stroke', 'none');
 
-    // TP-colored stripes on depth faces (4D + TP)
-    if (grouping && tpInfo && tpInfo.tpSize > 1) {
-        const B = grouping.outer;
-        const n_h = grouping.inner;
-        const tpSize = tpInfo.tpSize;
-        const headsPerRank = n_h / tpSize;
-        const total = B * n_h;
+    if (hasParallelism) {
+        const rx = x + w;
 
-        for (let b = 0; b < B; b++) {
-            for (let r = 0; r < tpSize; r++) {
-                const startSlice = b * n_h + r * headsPerRank;
-                const endSlice = startSlice + headsPerRank;
-                const f0 = startSlice / total;
-                const f1 = endSlice / total;
-                const tpColor = TP_COLORS[r % TP_COLORS.length];
+        for (let dp = 0; dp < dpSize; dp++) {
+            for (let tp = 0; tp < tpSize; tp++) {
+                const rankIdx = dp * tpSize + tp;
+                const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
+                const tf0 = tp / tpSize, tf1 = (tp + 1) / tpSize;
+                const df0 = dpFracs[dp], df1 = dpFracs[dp + 1];
 
-                // Right face stripe
-                const rx0 = dx * f0, ry0 = dy * f0;
-                const rx1 = dx * f1, ry1 = dy * f1;
-                g.append('polygon')
+                const cell = g.append('polygon')
                     .attr('points', [
-                        `${x+w+rx0},${y+ry0}`, `${x+w+rx1},${y+ry1}`,
-                        `${x+w+rx1},${y+h+ry1}`, `${x+w+rx0},${y+h+ry0}`
+                        `${rx + dx*tf0},${y + h*df0 + dy*tf0}`,
+                        `${rx + dx*tf1},${y + h*df0 + dy*tf1}`,
+                        `${rx + dx*tf1},${y + h*df1 + dy*tf1}`,
+                        `${rx + dx*tf0},${y + h*df1 + dy*tf0}`,
                     ].join(' '))
-                    .attr('fill', tpColor).attr('fill-opacity', 0.5).attr('stroke', 'none');
+                    .attr('fill', cellColor).attr('fill-opacity', 0.5).attr('stroke', 'none')
+                    .style('cursor', 'pointer');
 
-                // Top face stripe
-                g.append('polygon')
-                    .attr('points', [
-                        `${x+rx0},${y+ry0}`, `${x+rx1},${y+ry1}`,
-                        `${x+w+rx1},${y+ry1}`, `${x+w+rx0},${y+ry0}`
-                    ].join(' '))
-                    .attr('fill', tpColor).attr('fill-opacity', 0.35).attr('stroke', 'none');
+                elements[dp][tp].right.push(cell);
+
+                cell.on('mouseenter', () => {
+                    highlightRightCell(dp, tp);
+                    if (onCellClick) onCellClick({ dp, tp, rankIdx });
+                });
+                cell.on('mouseleave', () => {
+                    clearAll();
+                    if (onCellClick) onCellClick(null);
+                });
+
+                if (dp === 0 && tpSize > 1) {
+                    const topEl = g.append('polygon')
+                        .attr('points', [
+                            `${x + dx*tf0},${y + dy*tf0}`,
+                            `${x + dx*tf1},${y + dy*tf1}`,
+                            `${x + w + dx*tf1},${y + dy*tf1}`,
+                            `${x + w + dx*tf0},${y + dy*tf0}`,
+                        ].join(' '))
+                        .attr('fill', cellColor).attr('fill-opacity', 0.35).attr('stroke', 'none')
+                        .style('cursor', 'default');
+
+                    elements[dp][tp].top.push(topEl);
+
+                    topEl.on('mouseenter', () => {
+                        highlightTopBand(tp);
+                        if (onCellClick) onCellClick({ dp: null, tp, rankIdx: tp });
+                    });
+                    topEl.on('mouseleave', () => {
+                        clearAll();
+                        if (onCellClick) onCellClick(null);
+                    });
+                }
             }
         }
 
-        // Boundary lines
-        for (let i = 1; i < total; i++) {
-            const isBatch = (i % n_h === 0);
-            const isTp = (i % headsPerRank === 0);
-            if (!isBatch && !isTp) continue;
-            const frac = i / total;
+        for (let tp = 1; tp < tpSize; tp++) {
+            const frac = tp / tpSize;
             const lx = dx * frac, ly = dy * frac;
-            const opacity = isBatch ? 0.6 : 0.35;
-            const strokeW = isBatch ? 1 : 0.75;
             g.append('polyline')
                 .attr('points', `${x+lx},${y+ly} ${x+w+lx},${y+ly} ${x+w+lx},${y+h+ly}`)
                 .attr('fill', 'none')
-                .attr('stroke', '#fff').attr('stroke-opacity', opacity)
-                .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
+                .attr('stroke', '#fff').attr('stroke-opacity', 0.35)
+                .attr('stroke-width', 0.75).attr('stroke-linejoin', 'round');
+        }
+
+        for (let dp = 1; dp < dpSize; dp++) {
+            const yy = y + h * dpFracs[dp];
+            g.append('line')
+                .attr('x1', rx).attr('y1', yy)
+                .attr('x2', rx + dx).attr('y2', yy + dy)
+                .attr('stroke', '#fff').attr('stroke-opacity', 0.35)
+                .attr('stroke-width', 0.75);
         }
     }
 
@@ -117,6 +194,41 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         .attr('x', x).attr('y', y).attr('width', w).attr('height', h)
         .attr('fill', color).attr('fill-opacity', 0.85)
         .attr('stroke', d3.color(color).darker(0.3)).attr('stroke-width', 1);
+
+    if (hasParallelism) {
+        for (let dp = 0; dp < dpSize; dp++) {
+            const rankIdx = dp * tpSize;
+            const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
+            const bandY = y + dpFracs[dp] * h;
+            const bandH = (dpFracs[dp + 1] - dpFracs[dp]) * h;
+
+            const cell = g.append('rect')
+                .attr('x', x).attr('y', bandY)
+                .attr('width', w).attr('height', bandH)
+                .attr('fill', dpSize > 1 ? cellColor : 'transparent')
+                .attr('fill-opacity', dpSize > 1 ? 0.4 : 0)
+                .attr('stroke', 'none')
+                .style('cursor', 'pointer');
+
+            elements[dp][0].front.push(cell);
+
+            cell.on('mouseenter', () => {
+                highlightFrontStripe(dp);
+                if (onCellClick) onCellClick({ dp, tp: null, rankIdx: dp * tpSize });
+            });
+            cell.on('mouseleave', () => {
+                clearAll();
+                if (onCellClick) onCellClick(null);
+            });
+        }
+        for (let dp = 1; dp < dpSize; dp++) {
+            const ly = y + dpFracs[dp] * h;
+            g.append('line')
+                .attr('x1', x).attr('y1', ly).attr('x2', x + w).attr('y2', ly)
+                .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+        }
+    }
+
     g.append('text')
         .attr('class', 'tensor-label')
         .attr('x', x + w / 2).attr('y', y + h / 2 + 4)

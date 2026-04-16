@@ -13,6 +13,10 @@ const ARROWHEAD_LEN = 8;  // must match markerWidth in index.html
 
 // TP rank colors
 export const TP_COLORS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#c0392b'];
+export const RANK_COLORS = [
+    '#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#c0392b',
+    '#ff6b9d','#51cf66','#ffd43b','#845ef7','#339af0','#ff922b','#20c997','#f06595',
+];
 
 // --- Scale ---
 
@@ -130,11 +134,11 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
             .attr('stroke-width', 1);
 
-        // Depth face decorations: TP stripes and/or grouping lines
-        if (shape.length === 3 && type !== 'weight' && type !== 'mask' && tensor.tpSharded && tensor.tpSize > 1) {
-            draw4DTpDepth(group, x, y, w, h, off, 1, shape[0], tensor.tpSize);
-        } else if (tensor.tpSharded && tensor.tpSize > 1) {
-            drawTpStripes(group, x + w, y, off, h, tensor.tpSize);
+        // Depth face decorations: TP/DP parallelism coloring
+        const _tp = (tensor.tpSharded && tensor.tpSize > 1) ? tensor.tpSize : 1;
+        const _dp = (tensor.dpSharded && tensor.dpSize > 1) ? tensor.dpSize : 1;
+        if ((_tp > 1 || _dp > 1) && type !== 'mask') {
+            drawParallelismDepthFaces(group, x, y, w, h, off, _tp, _dp, type === 'weight', tensor.dpBoundaryFracs);
         }
     }
 
@@ -166,6 +170,16 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
             frontRect.attr('stroke', d3.color(color).darker(0.3))
                 .attr('stroke-width', 1);
         }
+    }
+
+    // DP sharding stripes on front face
+    if (tensor.dpSharded && tensor.dpSize > 1 && type !== 'mask') {
+        drawDpFrontStripes(group, x, y, w, h, tensor.dpSize, tensor.tpSize || 1, tensor.dpBoundaryFracs);
+    }
+
+    // TP sharding stripes on 2D tensor front face
+    if (d === 0 && tensor.tpSharded && tensor.tpSize > 1 && tensor.tpDim != null && type !== 'mask') {
+        drawTpFrontStripes(group, x, y, w, h, tensor.tpSize, tensor.tpDim);
     }
 
     // Request boundary lines (when B > 1)
@@ -313,6 +327,131 @@ function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
             .attr('fill', 'none')
             .attr('stroke', '#fff').attr('stroke-opacity', opacity)
             .attr('stroke-width', strokeW).attr('stroke-linejoin', 'round');
+    }
+}
+
+// --- DP front face stripes ---
+
+function drawDpFrontStripes(group, x, y, w, h, dpSize, tpSize, dpFracs) {
+    const fracs = dpFracs || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
+    for (let dp = 0; dp < dpSize; dp++) {
+        const rankIdx = dp * tpSize;
+        const bandY = y + fracs[dp] * h;
+        const bandH = (fracs[dp + 1] - fracs[dp]) * h;
+        group.append('rect')
+            .attr('x', x).attr('y', bandY)
+            .attr('width', w).attr('height', bandH)
+            .attr('fill', RANK_COLORS[rankIdx % RANK_COLORS.length])
+            .attr('fill-opacity', 0.4)
+            .attr('stroke', 'none');
+    }
+    for (let dp = 1; dp < dpSize; dp++) {
+        const ly = y + fracs[dp] * h;
+        group.append('line')
+            .attr('x1', x).attr('y1', ly)
+            .attr('x2', x + w).attr('y2', ly)
+            .attr('stroke', '#fff').attr('stroke-width', 0.75)
+            .attr('stroke-opacity', 0.4);
+    }
+}
+
+function drawTpFrontStripes(group, x, y, w, h, tpSize, tpDim) {
+    for (let tp = 0; tp < tpSize; tp++) {
+        const color = TP_COLORS[tp % TP_COLORS.length];
+        if (tpDim === 1) {
+            const sx = x + (tp / tpSize) * w;
+            const sw = w / tpSize;
+            group.append('rect')
+                .attr('x', sx).attr('y', y).attr('width', sw).attr('height', h)
+                .attr('fill', color).attr('fill-opacity', 0.3).attr('stroke', 'none');
+        } else {
+            const sy = y + (tp / tpSize) * h;
+            const sh = h / tpSize;
+            group.append('rect')
+                .attr('x', x).attr('y', sy).attr('width', w).attr('height', sh)
+                .attr('fill', color).attr('fill-opacity', 0.3).attr('stroke', 'none');
+        }
+    }
+    for (let tp = 1; tp < tpSize; tp++) {
+        if (tpDim === 1) {
+            const lx = x + (tp / tpSize) * w;
+            group.append('line')
+                .attr('x1', lx).attr('y1', y).attr('x2', lx).attr('y2', y + h)
+                .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+        } else {
+            const ly = y + (tp / tpSize) * h;
+            group.append('line')
+                .attr('x1', x).attr('y1', ly).attr('x2', x + w).attr('y2', ly)
+                .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+        }
+    }
+}
+
+// --- Combined TP+DP depth face rendering ---
+
+function drawParallelismDepthFaces(group, x, y, w, h, off, tpSize, dpSize, skipTopFace, dpFracs) {
+    const rx = x + w;
+    const fracs = dpFracs || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
+
+    // Right face: dp×tp grid (horizontal bands × vertical bands)
+    for (let dp = 0; dp < dpSize; dp++) {
+        for (let tp = 0; tp < tpSize; tp++) {
+            const rankIdx = dp * tpSize + tp;
+            const color = RANK_COLORS[rankIdx % RANK_COLORS.length];
+            const tf0 = tp / tpSize, tf1 = (tp + 1) / tpSize;
+            const df0 = fracs[dp], df1 = fracs[dp + 1];
+
+            group.append('polygon')
+                .attr('points', polyStr([
+                    [rx + off.dx * tf0, y + h * df0 + off.dy * tf0],
+                    [rx + off.dx * tf1, y + h * df0 + off.dy * tf1],
+                    [rx + off.dx * tf1, y + h * df1 + off.dy * tf1],
+                    [rx + off.dx * tf0, y + h * df1 + off.dy * tf0],
+                ]))
+                .attr('fill', color)
+                .attr('fill-opacity', 0.5)
+                .attr('stroke', 'none');
+        }
+    }
+
+    // Top face: tp bands along depth (dp doesn't divide this surface)
+    if (!skipTopFace && tpSize > 1) {
+        for (let tp = 0; tp < tpSize; tp++) {
+            const color = RANK_COLORS[tp % RANK_COLORS.length];
+            const tf0 = tp / tpSize, tf1 = (tp + 1) / tpSize;
+
+            group.append('polygon')
+                .attr('points', polyStr([
+                    [x + off.dx * tf0, y + off.dy * tf0],
+                    [x + off.dx * tf1, y + off.dy * tf1],
+                    [x + w + off.dx * tf1, y + off.dy * tf1],
+                    [x + w + off.dx * tf0, y + off.dy * tf0],
+                ]))
+                .attr('fill', color)
+                .attr('fill-opacity', 0.35)
+                .attr('stroke', 'none');
+        }
+    }
+
+    // TP boundary lines (vertical on right face, L-shaped across top)
+    for (let tp = 1; tp < tpSize; tp++) {
+        const frac = tp / tpSize;
+        const lx = off.dx * frac, ly = off.dy * frac;
+        group.append('polyline')
+            .attr('points', `${x + lx},${y + ly} ${x + w + lx},${y + ly} ${x + w + lx},${y + h + ly}`)
+            .attr('fill', 'none')
+            .attr('stroke', '#fff').attr('stroke-opacity', 0.35)
+            .attr('stroke-width', 0.75).attr('stroke-linejoin', 'round');
+    }
+
+    // DP boundary lines (horizontal on right face)
+    for (let dp = 1; dp < dpSize; dp++) {
+        const yy = y + h * fracs[dp];
+        group.append('line')
+            .attr('x1', rx).attr('y1', yy)
+            .attr('x2', rx + off.dx).attr('y2', yy + off.dy)
+            .attr('stroke', '#fff').attr('stroke-opacity', 0.35)
+            .attr('stroke-width', 0.75);
     }
 }
 

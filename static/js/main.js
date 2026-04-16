@@ -27,6 +27,7 @@ const SLIDER_DEFS = {
     d_q:    { label: 'd_q (Q latent)',   min: 1, max: 4096, step: 1,  default: 1536 },
     d_r:    { label: 'd_r (RoPE dim)',   min: 1, max: 256,  step: 1,  default: 64 },
     tp_size:{ label: 'TP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
+    dp_size:{ label: 'DP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
 };
 
@@ -55,10 +56,10 @@ function maxTpForHeads(n_h) {
 const RUNTIME_SLIDERS = ['B', 'S', 'S_q'];
 
 const VARIANT_SLIDERS = {
-    mha: ['n_h', 'd_h', 'tp_size'],
-    gqa: ['n_h', 'd_h', 'n_kv', 'tp_size'],
-    mqa: ['n_h', 'd_h', 'tp_size'],
-    mla: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r', 'tp_size'],
+    mha: ['n_h', 'd_h'],
+    gqa: ['n_h', 'd_h', 'n_kv'],
+    mqa: ['n_h', 'd_h'],
+    mla: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r'],
 };
 
 // Model presets
@@ -229,7 +230,7 @@ function buildSlider(container, key) {
     const header = group.append('div').attr('class', 'slider-header');
     header.append('span').attr('class', 'dim-name').text(def.label);
 
-    const isLog2 = key === 'tp_size' || key === 'block_size';
+    const isLog2 = key === 'tp_size' || key === 'dp_size' || key === 'block_size';
     const isLogScale = def.logScale;
     const effectiveMax = key === 'tp_size' ? maxTpForHeads(params.n_h) : def.max;
 
@@ -328,10 +329,15 @@ function buildSlider(container, key) {
                 } else if (label.includes('n_h') && label.includes('heads')) {
                     range.property('value', params.n_h);
                     num.property('value', params.n_h);
-                } else if (label.includes('TP')) {
+                }
+            });
+            // Update TP slider max in the parallelism section
+            d3.selectAll('#parallelism-sliders .slider-group').each(function() {
+                const label = d3.select(this).select('.dim-name').text();
+                if (label.includes('TP')) {
                     const tpMax = maxTpForHeads(params.n_h);
-                    range.attr('max', Math.log2(tpMax));
-                    num.attr('max', tpMax);
+                    d3.select(this).select('input[type="range"]').attr('max', Math.log2(tpMax));
+                    d3.select(this).select('input[type="number"]').attr('max', tpMax);
                 }
             });
         }
@@ -393,6 +399,13 @@ function buildSliders() {
         if (currentVariant === 'gqa' && key === 'n_kv') continue; // already built above
         buildSlider(dimContainer, key);
     }
+
+    // Parallelism sliders (TP + DP)
+    const parContainer = d3.select('#parallelism-sliders');
+    parContainer.selectAll('*').remove();
+    const parPair = parContainer.append('div').attr('class', 'slider-pair');
+    buildSlider(parPair, 'tp_size');
+    buildSlider(parPair, 'dp_size');
 
     // Paged attention sliders (separate section)
     const pagedContainer = d3.select('#paged-sliders');
@@ -560,11 +573,26 @@ function updateDerived() {
         const ratio = (params.n_h / params.n_kv).toFixed(1);
         archHtml += `<div class="derived-dim">Heads per group: <span>${gpc}</span> (${ratio}× reduction)</div>`;
     }
+    d3.select('#derived').html(archHtml);
+
+    // Parallelism derived values
+    let parHtml = '';
     if (params.tp_size > 1) {
         const headsPerRank = Math.floor(params.n_h / params.tp_size);
-        archHtml += `<div class="derived-dim">Heads per rank: <span>${headsPerRank}</span></div>`;
+        parHtml += `<div class="derived-dim">Heads per TP rank: <span>${headsPerRank}</span></div>`;
     }
-    d3.select('#derived').html(archHtml);
+    if (params.dp_size > 1 && params.dp_size > params.B) {
+        const effectiveDp = Math.min(params.dp_size, params.B);
+        const idleRanks = params.dp_size - effectiveDp;
+        parHtml += `<div class="derived-dim" style="color:#e67e22">Effective DP: <span>${effectiveDp}</span> (${idleRanks} idle rank${idleRanks !== 1 ? 's' : ''})</div>`;
+    }
+    if (params.dp_size > 1 || params.tp_size > 1) {
+        const totalRanks = Math.max(1, params.dp_size) * Math.max(1, params.tp_size);
+        if (totalRanks > 1) {
+            parHtml += `<div class="derived-dim">Total ranks (DP\u00d7TP): <span>${totalRanks}</span></div>`;
+        }
+    }
+    d3.select('#derived-parallelism').html(parHtml);
 
     // Runtime derived values
     let rtHtml = '';
@@ -896,6 +924,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
 function annotateGraph(graph) {
     if (params.B > 1) addMultiRequestAnnotations(graph, params);
     if (params.tp_size > 1) addTpAnnotations(graph, params);
+    if (params.dp_size > 1) addDpAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
     if (params.flashAttn) addFlashAttnAnnotations(graph, params);
 }
@@ -1000,6 +1029,9 @@ function renderMlaStacked() {
 
 function addTpAnnotations(graph, params) {
     const tp = params.tp_size;
+    const tensorMap = {};
+    for (const t of graph.tensors) tensorMap[t.id] = t;
+
     for (const t of graph.tensors) {
         if (t.dimNames && t.dimNames.includes('n_h')) {
             t.tpSharded = 'n_h';
@@ -1017,6 +1049,134 @@ function addTpAnnotations(graph, params) {
         outProjOp.desc += ` With TP=${tp}, each rank computes a partial output. An all-reduce (sum) combines results across ${tp} ranks.`;
         outProjOp.tpAllReduce = true;
         outProjOp.tpSize = tp;
+    }
+
+    // Annotate 2D weight matrices and their activation inputs/outputs with TP sharding
+    for (const op of graph.ops) {
+        if (op.type === 'compress') continue;
+        if (op.type !== 'matmul' && op.type !== 'decompress') continue;
+
+        for (const inputId of op.inputs) {
+            const t = tensorMap[inputId];
+            if (!t || t.type !== 'weight' || t.shape.length !== 2 || t.tpSharded) continue;
+
+            if (op.tpAllReduce) {
+                t.tpSharded = true;
+                t.tpSize = tp;
+                t.tpDim = 0;
+            } else {
+                const directOut = tensorMap[op.output];
+                const directHasHeads = directOut && directOut.dimNames &&
+                    (directOut.dimNames.includes('n_h') || directOut.dimNames.includes('n_kv'));
+
+                let nextHasHeads = false;
+                if (!directHasHeads) {
+                    nextHasHeads = graph.ops.some(o =>
+                        o.inputs.includes(op.output) && tensorMap[o.output] &&
+                        tensorMap[o.output].dimNames &&
+                        (tensorMap[o.output].dimNames.includes('n_h') ||
+                         tensorMap[o.output].dimNames.includes('n_kv'))
+                    );
+                }
+
+                if ((directHasHeads || nextHasHeads) && t.shape[1] % tp === 0) {
+                    t.tpSharded = true;
+                    t.tpSize = tp;
+                    t.tpDim = 1;
+                }
+            }
+        }
+    }
+
+    // Propagate TP to 2D activation tensors connected to TP-sharded matmuls
+    for (const op of graph.ops) {
+        if (op.type === 'compress') continue;
+        if (op.type !== 'matmul' && op.type !== 'decompress') continue;
+
+        const weightInput = op.inputs.map(id => tensorMap[id]).find(t => t && t.type === 'weight' && t.tpSharded);
+        if (!weightInput) continue;
+
+        if (weightInput.tpDim === 1) {
+            // Column-parallel: output's last dim is sharded
+            const out = tensorMap[op.output];
+            if (out && out.shape.length === 2 && !out.tpSharded) {
+                out.tpSharded = true;
+                out.tpSize = tp;
+                out.tpDim = 1;
+            }
+        } else if (weightInput.tpDim === 0) {
+            // Row-parallel: the non-weight input's last dim is sharded
+            for (const inputId of op.inputs) {
+                const t = tensorMap[inputId];
+                if (t && t.type !== 'weight' && t.shape.length === 2 && !t.tpSharded) {
+                    t.tpSharded = true;
+                    t.tpSize = tp;
+                    t.tpDim = 1;
+                }
+            }
+        }
+    }
+
+    // Propagate TP through reshape/view ops (2D TP-sharded → 3D/4D or vice versa)
+    for (const op of graph.ops) {
+        if (op.type !== 'reshape') continue;
+        const inT = tensorMap[op.inputs[0]];
+        const outT = tensorMap[op.output];
+        if (!inT || !outT) continue;
+
+        if (inT.tpSharded && !outT.tpSharded && outT.shape.length === 2) {
+            outT.tpSharded = true;
+            outT.tpSize = tp;
+            outT.tpDim = 1;
+        } else if (outT.tpSharded && !inT.tpSharded && inT.shape.length === 2) {
+            inT.tpSharded = true;
+            inT.tpSize = tp;
+            inT.tpDim = 1;
+        }
+    }
+}
+
+// --- DP annotations ---
+
+function addDpAnnotations(graph, params) {
+    const dp = params.dp_size;
+    const B = params.B || 1;
+    const effectiveDp = Math.min(dp, B);
+    const sLens = params.seqLens ? params.seqLens.slice(0, B) : [params.S];
+    const sqLens = params.queryLens ? params.queryLens.slice(0, B) : [params.S_q];
+
+    for (const t of graph.tensors) {
+        if (t.type === 'weight' || t.type === 'mask') continue;
+        if (!t.dimNames) continue;
+
+        let seqDim = null;
+        for (const d of t.dimNames) {
+            if (d === 'S_q' || d === '\u03a3S_q' || d === 'S' || d === '\u03a3S') {
+                seqDim = d;
+                break;
+            }
+        }
+        if (!seqDim) continue;
+
+        t.dpSharded = seqDim;
+        t.dpSize = effectiveDp;
+        if (dp > B) t.dpIdleRanks = dp - B;
+
+        if (B > 1) {
+            const lens = (seqDim === 'S_q' || seqDim === '\u03a3S_q') ? sqLens : sLens;
+            const total = lens.reduce((a, b) => a + b, 0);
+            const dpFracs = [0];
+            let cum = 0;
+            for (let r = 0; r < B; r++) {
+                cum += lens[r];
+                const curRank = Math.floor(r * effectiveDp / B);
+                const nextRank = (r + 1 < B) ? Math.floor((r + 1) * effectiveDp / B) : effectiveDp;
+                if (nextRank > curRank) {
+                    dpFracs.push(cum / total);
+                }
+            }
+            t.dpBoundaryFracs = dpFracs;
+        }
     }
 }
 
@@ -1284,6 +1444,7 @@ const GLOSSARY = [
         { term: 'PagedAttention', def: 'A memory management technique (from vLLM) that stores the KV cache in fixed-size blocks rather than contiguous memory, reducing fragmentation and enabling efficient batching.' },
         { term: 'RoPE', aka: 'Rotary Position Embeddings', def: 'A method for encoding token position by rotating Q and K vectors. Encodes relative position information directly into the attention computation.' },
         { term: 'Tensor Parallelism', aka: 'TP', def: 'Splits attention heads across multiple GPUs. Each GPU computes a subset of heads, then results are combined with an all-reduce operation.' },
+        { term: 'Data Parallelism', aka: 'DP', def: 'Splits the input batch across multiple GPUs along the sequence dimension. Each GPU processes a subset of the data independently using the full model weights.' },
         { term: 'KV cache', def: 'Stores previously computed key and value tensors so they don\'t need to be recomputed for each new token during autoregressive generation.' },
     ]},
     { section: 'Performance', entries: [

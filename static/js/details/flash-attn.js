@@ -1,7 +1,7 @@
 // flash-attn.js — FlashAttention-2 tiling detail visualization
 // Shows CTA assignment, tile computation, memory hierarchy, and split-KV reduction.
 
-import { drawDetailBlock } from './shared.js';
+import { drawDetailBlock, RANK_COLORS } from './shared.js';
 import { fmtBytes, fmtNum, tensorBytes, computeOpCost, GPU_SPECS, computeRooflineThreshold } from '../costs.js';
 
 const PAD = 20;
@@ -531,6 +531,9 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     const Br = params.block_q, Bc = params.block_kv;
     const splitKV = params.splitKV;
     const packed = isGQA && params.packGQA;
+    const B = params.B || 1;
+    const dpSize = (params.dp_size || 1);
+    const effectiveDp = Math.min(dpSize, B);
 
     const sectionG = g.append('g').attr('transform', `translate(${x}, ${y})`);
 
@@ -546,17 +549,18 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     const titleH = 24;
     const labelW = 60;
     const labelH = 20;
+    const dpLabelMargin = (effectiveDp > 1) ? 36 : 0;
 
     // Compute cell size to fit
-    const maxGridW = width - labelW - 20;
+    const maxGridW = width - labelW - dpLabelMargin - 10;
     const maxGridH = 180;
     const cellW = Math.min(40, maxGridW / numKVBlocks);
     const cellH = Math.min(28, maxGridH / numQBlocks);
     const gridW = cellW * numKVBlocks;
     const gridH = cellH * numQBlocks;
 
-    // Center the grid (labels + cells) within the available width
-    const totalGridW = labelW + gridW;
+    // Center the grid (labels + cells + DP margin) within the available width
+    const totalGridW = labelW + gridW + dpLabelMargin;
     const gridX = labelW + Math.max(0, (width - totalGridW) / 2);
     const gridY = titleH + labelH;
 
@@ -586,7 +590,6 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     }
 
     // Build cumulative offsets for multi-request block-diagonal masking
-    const B = params.B || 1;
     const queryLens = params.queryLens ? params.queryLens.slice(0, B) : [S_q];
     const seqLens = params.seqLens ? params.seqLens.slice(0, B) : [S];
     const cumSq = [0];
@@ -644,12 +647,13 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
                 .attr('width', cellW - 1)
                 .attr('height', cellH - 1)
                 .attr('rx', 2)
-                .style('cursor', 'pointer');
+                .style('cursor', causallyReachable ? 'pointer' : 'default');
 
             if (!causallyReachable) {
                 // Grayed out — causal mask skips this block
                 cell.attr('fill', '#1a1d2a').attr('fill-opacity', 0.5)
-                    .attr('stroke', '#2a2d3a').attr('stroke-width', 0.5);
+                    .attr('stroke', '#2a2d3a').attr('stroke-width', 0.5)
+                    .attr('pointer-events', 'none');
             } else if (splitKV) {
                 // Each cell is a separate CTA
                 cell.attr('fill', color).attr('fill-opacity', isSelected ? 0.9 : 0.4)
@@ -709,27 +713,92 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
         }
     }
 
-    // Legend
+    // DP rank outlines on the grid
+    if (effectiveDp > 1) {
+        for (let dp = 0; dp < effectiveDp; dp++) {
+            const rankColor = RANK_COLORS[dp * (params.tp_size || 1) % RANK_COLORS.length];
+            const qFrac0 = cumSq[_dpRankStartReq(dp, effectiveDp, B)] / S_q;
+            const qFrac1 = cumSq[_dpRankEndReq(dp, effectiveDp, B)] / S_q;
+            const kvFrac0 = cumS[_dpRankStartReq(dp, effectiveDp, B)] / S;
+            const kvFrac1 = cumS[_dpRankEndReq(dp, effectiveDp, B)] / S;
+
+            const rx = gridX + kvFrac0 * gridW;
+            const ry = gridY + qFrac0 * gridH;
+            const rw = (kvFrac1 - kvFrac0) * gridW;
+            const rh = (qFrac1 - qFrac0) * gridH;
+
+            sectionG.append('rect')
+                .attr('x', rx - 1).attr('y', ry - 1)
+                .attr('width', rw + 2).attr('height', rh + 2)
+                .attr('fill', 'none')
+                .attr('stroke', rankColor).attr('stroke-width', 1.5)
+                .attr('stroke-dasharray', '4,2').attr('stroke-opacity', 0.8)
+                .attr('rx', 2)
+                .attr('pointer-events', 'none');
+
+            const labelX = rx + rw + 4;
+            const labelY = ry + rh / 2 + 3;
+            if (rw >= 8 && rh >= 8) {
+                sectionG.append('text')
+                    .attr('x', labelX).attr('y', labelY)
+                    .attr('fill', rankColor).attr('font-size', '9px').attr('font-weight', '600')
+                    .attr('pointer-events', 'none')
+                    .text(`DP${dp}`);
+            }
+        }
+    }
+
+    // Legend + selection info
     const legendY = gridY + gridH + 10;
-    const legendG = sectionG.append('g').attr('transform', `translate(0, ${legendY})`);
+    const gridCenterX = gridX + gridW / 2;
+    const legendG = sectionG.append('g').attr('transform', `translate(${gridX}, ${legendY})`);
     legendG.append('rect').attr('width', 8).attr('height', 8).attr('fill', '#1a1d2a').attr('stroke', '#2a2d3a').attr('rx', 1);
     legendG.append('text').attr('x', 12).attr('y', 7).attr('fill', '#666').attr('font-size', '9px')
         .text('Skipped (causal mask)');
 
-    const selInfo = sectionG.append('text')
-        .attr('x', 120).attr('y', legendY + 7)
-        .attr('fill', '#aaa').attr('font-size', '10px');
-
     const qRange = `[${selectedQ * Br}..${Math.min((selectedQ + 1) * Br, S_q) - 1}]`;
     const kvRange = `[${selectedKV * Bc}..${Math.min((selectedKV + 1) * Bc, S) - 1}]`;
-    selInfo.text(`Selected: Q rows ${qRange}, KV rows ${kvRange}`);
+    let selText = `Selected: Q rows ${qRange}, KV rows ${kvRange}`;
+    if (effectiveDp > 1) {
+        const qMid = (selectedQ + 0.5) * Br;
+        let selDp = null;
+        for (let dp = 0; dp < effectiveDp; dp++) {
+            const s = cumSq[_dpRankStartReq(dp, effectiveDp, B)];
+            const e = cumSq[_dpRankEndReq(dp, effectiveDp, B)];
+            if (qMid >= s && qMid < e) { selDp = dp; break; }
+        }
+        if (selDp != null) selText += ` — DP rank ${selDp}`;
+    }
+    sectionG.append('text')
+        .attr('x', gridCenterX).attr('y', legendY + 20)
+        .attr('text-anchor', 'middle')
+        .attr('fill', '#aaa').attr('font-size', '10px')
+        .text(selText);
 
-    let bottomY = gridY + gridH + 28;
+    let bottomY = gridY + gridH + 38;
+
+    // DP annotation note
+    if (effectiveDp > 1) {
+        sectionG.append('text')
+            .attr('x', width / 2).attr('y', bottomY)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#7c8cf8').attr('font-size', '9px').attr('font-style', 'italic')
+            .text(`${effectiveDp} DP ranks — each rank runs CTAs only within its dashed region (no cross-rank attention)`);
+        bottomY += 16;
+        if (dpSize > B) {
+            sectionG.append('text')
+                .attr('x', width / 2).attr('y', bottomY)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#e67e22').attr('font-size', '9px')
+                .text(`${dpSize - B} idle DP rank${dpSize - B !== 1 ? 's' : ''} (DP ≥ ${B} = batch size)`);
+            bottomY += 16;
+        }
+    }
 
     // PackGQA annotation
     if (packed) {
         sectionG.append('text')
-            .attr('x', width / 2).attr('y', legendY + 22)
+            .attr('x', width / 2).attr('y', bottomY)
             .attr('text-anchor', 'middle')
             .attr('fill', '#e67e22').attr('font-size', '9px').attr('font-style', 'italic')
             .text(`Each CTA processes ${G} query heads (h₀..h₍${G-1}₎) sharing the same KV head \u2014 K/V tiles loaded once per group`);
@@ -1063,10 +1132,24 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
 
     const qRowStart = selQ * Br, qRowEnd = qRowStart + actBr - 1;
     const kvRowStart = selKV * Bc, kvRowEnd = kvRowStart + actBc - 1;
+    let tileSubtext = `Q rows ${qRowStart}:${qRowEnd}, KV rows ${kvRowStart}:${kvRowEnd}`;
+    const _tileEffDp = Math.min(params.dp_size || 1, params.B || 1);
+    if (_tileEffDp > 1) {
+        const B = params.B || 1;
+        const cumSqTile = [0];
+        const sqLens = params.queryLens ? params.queryLens.slice(0, B) : [S_q];
+        for (let r = 0; r < sqLens.length; r++) cumSqTile.push(cumSqTile[r] + sqLens[r]);
+        const qMid = (selQ + 0.5) * Br;
+        for (let dp = 0; dp < _tileEffDp; dp++) {
+            const s = cumSqTile[_dpRankStartReq(dp, _tileEffDp, B)];
+            const e = cumSqTile[_dpRankEndReq(dp, _tileEffDp, B)];
+            if (qMid >= s && qMid < e) { tileSubtext += ` — DP rank ${dp}`; break; }
+        }
+    }
     sectionG.append('text')
         .attr('x', 0).attr('y', 26)
         .attr('fill', '#666').attr('font-size', '9px')
-        .text(`Q rows ${qRowStart}:${qRowEnd}, KV rows ${kvRowStart}:${kvRowEnd}`);
+        .text(tileSubtext);
 
     const topY = 36;
     const midX = width / 2;
@@ -1422,6 +1505,20 @@ function drawSplitKVReduction(g, x, y, width, params, S_q, numKVBlocks, selQ, O,
 }
 
 // --- Helpers ---
+
+function _dpRankStartReq(dp, effectiveDp, B) {
+    for (let r = 0; r < B; r++) {
+        if (Math.floor(r * effectiveDp / B) === dp) return r;
+    }
+    return B;
+}
+
+function _dpRankEndReq(dp, effectiveDp, B) {
+    for (let r = B - 1; r >= 0; r--) {
+        if (Math.floor(r * effectiveDp / B) === dp) return r + 1;
+    }
+    return 0;
+}
 
 function drawTileBlock(g, x, y, w, h, color, label, shapeStr, opacity) {
     g.append('rect')

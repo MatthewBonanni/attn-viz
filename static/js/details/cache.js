@@ -2,6 +2,7 @@
 // Shows how K'/V' new tokens get sliced into fixed-size blocks and placed into a block table.
 
 import { fmtBytes } from '../costs.js';
+import { RANK_COLORS } from '../render.js';
 
 const SEQ_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
 
@@ -35,7 +36,55 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         g.append('text').attr('class', 'tensor-label')
             .attr('x', availW / 2).attr('y', y)
             .text(`Paged Cache: ${tensor.label}`);
-        y += 20;
+        y += 22;
+
+        // --- Request selector (top, prominent, wrapping) ---
+        if (B > 1) {
+            const btnW = 56;
+            const btnH = 22;
+            const btnGap = 6;
+            const btnsPerRow = Math.max(1, Math.floor(availW / (btnW + btnGap)));
+            const numRows = Math.ceil(B / btnsPerRow);
+
+            for (let ri = 0; ri < B; ri++) {
+                const bcolor = SEQ_COLORS[ri % SEQ_COLORS.length];
+                const isSelected = ri === selectedReq;
+                const col = ri % btnsPerRow;
+                const row = Math.floor(ri / btnsPerRow);
+                const rowCount = Math.min(B - row * btnsPerRow, btnsPerRow);
+                const rowW = rowCount * (btnW + btnGap) - btnGap;
+                const rowStartX = (availW - rowW) / 2;
+                const bx = rowStartX + col * (btnW + btnGap);
+                const by = y + row * (btnH + btnGap);
+                const rSq = sqLens[ri], rS = sLens[ri];
+                const rType = rSq === 1 ? 'decode' : rSq >= rS ? 'prefill' : rSq < 16 ? 'spec' : 'extend';
+
+                const btn = g.append('g').style('cursor', 'pointer')
+                    .on('click', () => { selectedReq = ri; redraw(); });
+
+                btn.append('rect')
+                    .attr('x', bx).attr('y', by - 2)
+                    .attr('width', btnW).attr('height', btnH)
+                    .attr('fill', isSelected ? bcolor : '#1e2030')
+                    .attr('fill-opacity', isSelected ? 0.6 : 1)
+                    .attr('stroke', bcolor).attr('stroke-width', isSelected ? 2.5 : 1)
+                    .attr('rx', 5);
+
+                btn.append('text')
+                    .attr('x', bx + btnW / 2).attr('y', by + 7)
+                    .attr('text-anchor', 'middle')
+                    .attr('fill', isSelected ? '#fff' : '#aaa').attr('font-size', '10px')
+                    .attr('font-weight', isSelected ? '700' : '400')
+                    .text(`Req ${ri}`);
+
+                btn.append('text')
+                    .attr('x', bx + btnW / 2).attr('y', by + 17)
+                    .attr('text-anchor', 'middle')
+                    .attr('fill', isSelected ? '#ddd' : '#666').attr('font-size', '7px')
+                    .text(rType);
+            }
+            y += numRows * (btnH + btnGap) + 4;
+        }
 
         // --- Section 1: Source tensor → slicing → blocks ---
         const srcLabel = src ? src.label : tensor.label;
@@ -283,38 +332,6 @@ export function drawPagedCacheDetail(svg, tensor, params) {
 
         y += sectionH + 16;
 
-        // --- Section 1b: Request selector ---
-        g.append('text')
-            .attr('x', 0).attr('y', y)
-            .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
-            .text('Select request:');
-
-        const btnX = 100;
-        for (let ri = 0; ri < B; ri++) {
-            const bcolor = SEQ_COLORS[ri % SEQ_COLORS.length];
-            const isSelected = ri === selectedReq;
-            const bx = btnX + ri * 44;
-
-            const btn = g.append('g').style('cursor', 'pointer')
-                .on('click', () => { selectedReq = ri; redraw(); });
-
-            btn.append('rect')
-                .attr('x', bx).attr('y', y - 10)
-                .attr('width', 40).attr('height', 16)
-                .attr('fill', isSelected ? bcolor : '#1e2030')
-                .attr('fill-opacity', isSelected ? 0.6 : 1)
-                .attr('stroke', bcolor).attr('stroke-width', isSelected ? 2 : 1)
-                .attr('rx', 4);
-
-            btn.append('text')
-                .attr('x', bx + 20).attr('y', y - 1)
-                .attr('text-anchor', 'middle')
-                .attr('fill', isSelected ? '#fff' : '#aaa').attr('font-size', '9px')
-                .attr('font-weight', isSelected ? '600' : '400')
-                .text(`Req ${ri}`);
-        }
-        y += 12;
-
         // Request info line
         g.append('text')
             .attr('x', 0).attr('y', y)
@@ -412,63 +429,89 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             .attr('fill', '#aaa').attr('font-size', '9px').text(`New S_q=${sq} tokens`);
         y += 18;
 
-        // --- Section 3: Physical memory layout ---
+        // --- Section 3: Logical blocks per DP rank ---
         y += 8;
-        g.append('text')
-            .attr('x', 0).attr('y', y)
-            .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
-            .text('Logical blocks (non-contiguous in memory)');
-        y += 16;
+        const dp = params.dp_size || 1;
 
-        // Collect all blocks then shuffle to show they're scattered in memory
-        const physicalBlocks = [];
-        for (let ri = 0; ri < B; ri++) {
-            for (let bi = 0; bi < blocksPerSeq[ri]; bi++) {
-                physicalBlocks.push({
-                    seq: ri, block: bi,
-                    tokens: Math.min(bs, sLens[ri] - bi * bs),
-                });
+        if (dp > 1) {
+            g.append('text').attr('x', 0).attr('y', y)
+                .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
+                .text('Logical blocks per DP rank (non-contiguous in memory)');
+            y += 16;
+        }
+
+        for (let rank = 0; rank < dp; rank++) {
+            // Determine which requests belong to this rank
+            const rankReqs = [];
+            for (let r = 0; r < B; r++) {
+                if (dp === 1 || Math.floor(r * dp / B) === rank) rankReqs.push(r);
             }
-        }
-        // Deterministic shuffle using a simple hash to scatter blocks
-        const shuffled = [...physicalBlocks];
-        for (let i = shuffled.length - 1; i > 0; i--) {
-            const j = ((i * 2654435761) >>> 0) % (i + 1);
-            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-        }
+            if (rankReqs.length === 0) continue;
 
-        const physBlockW = Math.max(18, Math.min(36, (availW - 20) / Math.max(shuffled.length, 1)));
-        const physBlockH = 24;
-        const physPerRow = Math.floor(availW / (physBlockW + 3)) || 1;
-        const physRowW = Math.min(shuffled.length, physPerRow) * (physBlockW + 3) - 3;
-        const physOffX = (availW - physRowW) / 2;
-
-        for (let i = 0; i < shuffled.length; i++) {
-            const pb = shuffled[i];
-            const col = i % physPerRow;
-            const row = Math.floor(i / physPerRow);
-            const pcolor = SEQ_COLORS[pb.seq % SEQ_COLORS.length];
-            const bx = physOffX + col * (physBlockW + 3);
-            const by = y + row * (physBlockH + 3);
-            const isSelReq = pb.seq === selectedReq;
-
-            g.append('rect')
-                .attr('x', bx).attr('y', by)
-                .attr('width', physBlockW).attr('height', physBlockH)
-                .attr('fill', pcolor).attr('fill-opacity', isSelReq ? 0.45 : 0.2)
-                .attr('stroke', pcolor).attr('stroke-width', isSelReq ? 1.5 : 0.5)
-                .attr('rx', 3);
-
-            if (physBlockW >= 18) {
-                g.append('text')
-                    .attr('x', bx + physBlockW / 2).attr('y', by + physBlockH / 2 + 3)
-                    .attr('text-anchor', 'middle')
-                    .attr('fill', '#ddd').attr('font-size', '7px')
-                    .text(`R${pb.seq}`);
+            if (dp > 1) {
+                const rankColor = RANK_COLORS[rank % RANK_COLORS.length];
+                g.append('text').attr('x', 0).attr('y', y)
+                    .attr('fill', rankColor).attr('font-size', '10px').attr('font-weight', '600')
+                    .text(`DP Rank ${rank} (Req ${rankReqs.join(', ')})`);
+                y += 14;
+            } else {
+                g.append('text').attr('x', 0).attr('y', y)
+                    .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
+                    .text('Logical blocks (non-contiguous in memory)');
+                y += 16;
             }
+
+            // Collect blocks for this rank's requests
+            const rankBlocks = [];
+            for (const ri of rankReqs) {
+                for (let bi = 0; bi < blocksPerSeq[ri]; bi++) {
+                    rankBlocks.push({
+                        seq: ri, block: bi,
+                        tokens: Math.min(bs, sLens[ri] - bi * bs),
+                    });
+                }
+            }
+
+            // Deterministic shuffle (vary seed per rank so layouts differ)
+            const shuffled = [...rankBlocks];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = ((i * 2654435761 + rank * 1234567) >>> 0) % (i + 1);
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+
+            const physBlockW = Math.max(18, Math.min(36, (availW - 20) / Math.max(shuffled.length, 1)));
+            const physBlockH = 24;
+            const physPerRow = Math.floor(availW / (physBlockW + 3)) || 1;
+            const physRowW = Math.min(shuffled.length, physPerRow) * (physBlockW + 3) - 3;
+            const physOffX = (availW - physRowW) / 2;
+
+            for (let i = 0; i < shuffled.length; i++) {
+                const pb = shuffled[i];
+                const col = i % physPerRow;
+                const row = Math.floor(i / physPerRow);
+                const pcolor = SEQ_COLORS[pb.seq % SEQ_COLORS.length];
+                const bx = physOffX + col * (physBlockW + 3);
+                const by = y + row * (physBlockH + 3);
+                const isSelReq = pb.seq === selectedReq;
+
+                g.append('rect')
+                    .attr('x', bx).attr('y', by)
+                    .attr('width', physBlockW).attr('height', physBlockH)
+                    .attr('fill', pcolor).attr('fill-opacity', isSelReq ? 0.45 : 0.2)
+                    .attr('stroke', pcolor).attr('stroke-width', isSelReq ? 1.5 : 0.5)
+                    .attr('rx', 3);
+
+                if (physBlockW >= 18) {
+                    g.append('text')
+                        .attr('x', bx + physBlockW / 2).attr('y', by + physBlockH / 2 + 3)
+                        .attr('text-anchor', 'middle')
+                        .attr('fill', '#ddd').attr('font-size', '7px')
+                        .text(`R${pb.seq}`);
+                }
+            }
+            const physRows = Math.ceil(shuffled.length / physPerRow);
+            y += physRows * (physBlockH + 3) + (dp > 1 ? 12 : 8);
         }
-        const physRows = Math.ceil(shuffled.length / physPerRow);
-        y += physRows * (physBlockH + 3) + 8;
 
         // --- Section 4: Block shape info ---
         y += 4;
@@ -478,6 +521,19 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         g.append('text').attr('x', 0).attr('y', y).attr('fill', '#777').attr('font-size', '10px')
             .text(`Block size: ${fmtBytes(blockBytes)} (${bs} tokens × ${fmtBytes(perTokenSize)}/token)`);
         y += 14;
+        if (dp > 1) {
+            for (let rank = 0; rank < dp; rank++) {
+                const rankReqs = [];
+                for (let r = 0; r < B; r++) {
+                    if (Math.floor(r * dp / B) === rank) rankReqs.push(r);
+                }
+                const rankBlocks = rankReqs.reduce((sum, ri) => sum + blocksPerSeq[ri], 0);
+                const rankColor = RANK_COLORS[rank % RANK_COLORS.length];
+                g.append('text').attr('x', 0).attr('y', y).attr('fill', rankColor).attr('font-size', '10px')
+                    .text(`DP Rank ${rank}: ${rankBlocks} blocks, ${fmtBytes(rankBlocks * blockBytes)}`);
+                y += 14;
+            }
+        }
         g.append('text').attr('x', 0).attr('y', y).attr('fill', '#777').attr('font-size', '10px')
             .text(`Total: ${totalBlocks} blocks (${blocksPerSeq.join(' + ')}), ${fmtBytes(totalBlocks * blockBytes)}`);
 
