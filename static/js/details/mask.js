@@ -103,26 +103,8 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
     const g = svg.append('g').attr('transform', `translate(${pad}, 38)`);
 
     const queryOffset = S - S_q;
-    const showCellText = cellSize >= 16;
-
-    // Compute scaled scores and softmax weights up front (used by Parts 0 and 2)
     const d_h = params.d_h || 64;
     const scale = 1 / Math.sqrt(d_h);
-    const rawScoreGrid = [];
-    const attnWeights = [];
-    for (let i = 0; i < S_q; i++) {
-        const rawRow = [];
-        const maskedScores = [];
-        for (let j = 0; j < S; j++) {
-            const s = pseudoScore(i, j) * scale;
-            rawRow.push(s);
-            maskedScores.push((i + queryOffset) >= j ? s : -Infinity);
-        }
-        rawScoreGrid.push(rawRow);
-        const exps = maskedScores.map(s => s === -Infinity ? 0 : Math.exp(s));
-        const sumExp = exps.reduce((a, b) => a + b, 0);
-        attnWeights.push(exps.map(e => e / sumExp));
-    }
 
     if (schematic) {
         // --- Part 0: QK^T scores schematic ---
@@ -171,11 +153,29 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
             .attr('text-anchor', 'middle').attr('fill', '#555')
             .attr('font-size', '9px').text('Schematic \u2014 reduce S to see individual cells');
 
-        // --- Part 3: Softmax bar chart ---
-        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 62, S, cellSize, attnWeights);
+        // --- Part 3: Softmax bar chart (only compute the single example row) ---
+        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 62, S, cellSize, null);
 
         svg.attr('height', softmaxBottom + 10);
         return;
+    }
+
+    // Compute scaled scores and softmax weights (only needed for non-schematic cell rendering)
+    const showCellText = cellSize >= 16;
+    const rawScoreGrid = [];
+    const attnWeights = [];
+    for (let i = 0; i < S_q; i++) {
+        const rawRow = [];
+        const maskedScores = [];
+        for (let j = 0; j < S; j++) {
+            const s = pseudoScore(i, j) * scale;
+            rawRow.push(s);
+            maskedScores.push((i + queryOffset) >= j ? s : -Infinity);
+        }
+        rawScoreGrid.push(rawRow);
+        const exps = maskedScores.map(s => s === -Infinity ? 0 : Math.exp(s));
+        const sumExp = exps.reduce((a, b) => a + b, 0);
+        attnWeights.push(exps.map(e => e / sumExp));
     }
 
     // --- Part 0: QK^T raw scores heatmap ---
@@ -451,7 +451,6 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
 
     const g = svg.append('g').attr('transform', `translate(${pad}, 38)`);
 
-    // Pre-compute block-diagonal scores and softmax weights for the full grid
     const d_h = params.d_h || 64;
     const scaleVal = 1 / Math.sqrt(d_h);
     // Build cumulative offsets
@@ -460,33 +459,6 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
         cumSq.push(cumSq[r] + sqLens[r]);
         cumS.push(cumS[r] + sLens[r]);
     }
-    // Full block-diagonal raw scores and attention weights
-    const rawScoreGrid = [];
-    const attnWeights = [];
-    for (let i = 0; i < dispRows; i++) {
-        const rawRow = new Array(dispCols).fill(0);
-        const maskedRow = new Array(dispCols).fill(-Infinity);
-        // Find which request this query row belongs to
-        let reqIdx = 0;
-        while (reqIdx < sqLens.length - 1 && i >= cumSq[reqIdx + 1]) reqIdx++;
-        const localI = i - cumSq[reqIdx];
-        const colStart = cumS[reqIdx];
-        const ns = sLens[reqIdx], nq = sqLens[reqIdx];
-        const qOff = ns - nq;
-        for (let j = 0; j < ns; j++) {
-            const s = pseudoScore(localI, j) * scaleVal;
-            rawRow[colStart + j] = s;
-            if ((localI + qOff) >= j) maskedRow[colStart + j] = s;
-        }
-        rawScoreGrid.push(rawRow);
-        const exps = maskedRow.map(s => s === -Infinity ? 0 : Math.exp(s));
-        const sumExp = exps.reduce((a, b) => a + b, 0);
-        attnWeights.push(exps.map(e => sumExp > 0 ? e / sumExp : 0));
-    }
-
-    // Request 0 weights for the softmax bar chart
-    const req0S = sLens[0];
-    const req0Weights = attnWeights.slice(0, sqLens[0]).map(row => row.slice(0, req0S));
 
     // --- Helper: draw block-diagonal boundary lines ---
     function drawBoundaryLines(gg, yBase) {
@@ -599,14 +571,41 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
             .attr('fill', '#777')
             .text(`Per-request: [${sqLens.map((q, i) => `S_q=${q} \u00d7 S=${sLens[i]}`).join(', ')}]`);
 
-        // --- Part 3: Softmax bar chart ---
-        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 80, req0S, cellSize, req0Weights);
+        // --- Part 3: Softmax bar chart (only compute single example row) ---
+        const req0S = sLens[0];
+        const softmaxBottom = drawSoftmaxSection(g, 0, y2 + gridH + 80, req0S, cellSize, null);
 
         svg.attr('height', softmaxBottom + 10);
         return;
     }
 
     // === Non-schematic (cell-by-cell) rendering ===
+
+    // Compute full block-diagonal scores and softmax weights for cell rendering
+    const rawScoreGrid = [];
+    const attnWeights = [];
+    for (let i = 0; i < dispRows; i++) {
+        const rawRow = new Array(dispCols).fill(0);
+        const maskedRow = new Array(dispCols).fill(-Infinity);
+        let reqIdx = 0;
+        while (reqIdx < sqLens.length - 1 && i >= cumSq[reqIdx + 1]) reqIdx++;
+        const localI = i - cumSq[reqIdx];
+        const colStart = cumS[reqIdx];
+        const ns = sLens[reqIdx], nq = sqLens[reqIdx];
+        const qOff = ns - nq;
+        for (let j = 0; j < ns; j++) {
+            const s = pseudoScore(localI, j) * scaleVal;
+            rawRow[colStart + j] = s;
+            if ((localI + qOff) >= j) maskedRow[colStart + j] = s;
+        }
+        rawScoreGrid.push(rawRow);
+        const exps = maskedRow.map(s => s === -Infinity ? 0 : Math.exp(s));
+        const sumExp = exps.reduce((a, b) => a + b, 0);
+        attnWeights.push(exps.map(e => sumExp > 0 ? e / sumExp : 0));
+    }
+
+    const req0S = sLens[0];
+    const req0Weights = attnWeights.slice(0, sqLens[0]).map(row => row.slice(0, req0S));
 
     const showCellText = cellSize >= 16;
     const showScoreText = cellSize >= 20;

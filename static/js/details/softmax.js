@@ -50,30 +50,53 @@ export function drawSoftmaxSection(g, x, y, dispS, _cellSize, precomputedWeights
         .attr('font-size', '9px')
         .text(`row ${exampleRow}`);
 
-    // Decide label density based on bar width
-    const showBarText = barW >= 14;
+    // When S is large, bin probabilities into at most MAX_BARS buckets
+    // to avoid creating thousands of sub-pixel SVG elements.
+    const MAX_BARS = 200;
+    const binned = dispS > MAX_BARS;
+    const numBars = binned ? MAX_BARS : dispS;
+    const renderBarW = binned ? chartW / numBars : barW;
+    const renderChartW = binned ? chartW : actualChartW;
 
-    for (let j = 0; j < dispS; j++) {
-        const allowed = probs[j] > 0;
-        const barH = allowed ? (probs[j] / maxProb) * barMaxH : 0;
+    // Decide label density based on bar width
+    const showBarText = renderBarW >= 14;
+
+    for (let b = 0; b < numBars; b++) {
+        let prob, allowed;
+        if (binned) {
+            // Each bin takes the max probability in its range
+            const jStart = Math.floor(b * dispS / numBars);
+            const jEnd = Math.floor((b + 1) * dispS / numBars);
+            let maxP = 0;
+            allowed = false;
+            for (let j = jStart; j < jEnd; j++) {
+                if (probs[j] > maxP) maxP = probs[j];
+                if (probs[j] > 0) allowed = true;
+            }
+            prob = maxP;
+        } else {
+            prob = probs[b];
+            allowed = prob > 0;
+        }
+        const barH = allowed ? (prob / maxProb) * barMaxH : 0;
 
         g.append('rect')
-            .attr('x', x + j * barW + (barW > 3 ? 1 : 0))
+            .attr('x', x + b * renderBarW + (renderBarW > 3 ? 1 : 0))
             .attr('y', barBaseY + barMaxH - barH)
-            .attr('width', Math.max(barW - (barW > 3 ? 2 : 0), 0.5))
-            .attr('height', Math.max(barH, barW >= 2 ? 1 : 0.5))
+            .attr('width', Math.max(renderBarW - (renderBarW > 3 ? 2 : 0), 0.5))
+            .attr('height', Math.max(barH, renderBarW >= 2 ? 1 : 0.5))
             .attr('fill', allowed ? '#f39c12' : '#2c3e50')
             .attr('fill-opacity', allowed ? 0.85 : 0.4)
-            .attr('rx', barW >= 4 ? 1 : 0);
+            .attr('rx', renderBarW >= 4 ? 1 : 0);
 
         if (showBarText) {
             g.append('text')
-                .attr('x', x + j * barW + barW / 2)
+                .attr('x', x + b * renderBarW + renderBarW / 2)
                 .attr('y', barBaseY + barMaxH + 12)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '8px')
                 .attr('fill', allowed ? '#ddd' : '#555')
-                .text(allowed ? probs[j].toFixed(2) : '0');
+                .text(allowed ? prob.toFixed(2) : '0');
         }
     }
 
@@ -81,8 +104,9 @@ export function drawSoftmaxSection(g, x, y, dispS, _cellSize, precomputedWeights
     if (!showBarText && dispS > 20) {
         const ticks = [0, exampleRow, dispS - 1];
         for (const t of ticks) {
+            const tickX = binned ? (t / dispS) * renderChartW : t * barW + barW / 2;
             g.append('text')
-                .attr('x', x + t * barW + barW / 2)
+                .attr('x', x + tickX)
                 .attr('y', barBaseY + barMaxH + 10)
                 .attr('text-anchor', 'middle')
                 .attr('font-size', '7px')
@@ -91,7 +115,9 @@ export function drawSoftmaxSection(g, x, y, dispS, _cellSize, precomputedWeights
         }
         // Causal boundary marker
         if (exampleRow < dispS - 1) {
-            const bx = x + (exampleRow + 0.5) * barW;
+            const bx = binned
+                ? x + ((exampleRow + 0.5) / dispS) * renderChartW
+                : x + (exampleRow + 0.5) * barW;
             g.append('line')
                 .attr('x1', bx).attr('y1', barBaseY)
                 .attr('x2', bx).attr('y2', barBaseY + barMaxH)

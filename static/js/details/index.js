@@ -200,7 +200,18 @@ function _renderGroupDetail(group) {
     svg.attr('height', 0);
 }
 
+let _refreshRafId = null;
 export function refreshDetail(graphs, params) {
+    if (!_currentDetail) return;
+    // Throttle to one detail refresh per animation frame
+    if (_refreshRafId) cancelAnimationFrame(_refreshRafId);
+    _refreshRafId = requestAnimationFrame(() => {
+        _refreshRafId = null;
+        _refreshDetailNow(graphs, params);
+    });
+}
+
+function _refreshDetailNow(graphs, params) {
     if (!_currentDetail) return;
     const panel = d3.select('#detail-panel');
     if (!panel.classed('visible')) return;
