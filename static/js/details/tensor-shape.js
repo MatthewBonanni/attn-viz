@@ -1,11 +1,27 @@
 // tensor-shape.js — Tensor shape detail visualization
-import { detailMetrics, drawDetailBlock, drawDetailBlock3D, TP_COLORS, RANK_COLORS } from './shared.js';
+import { detailMetrics, drawDetailBlock, drawDetailBlock3D, TP_COLORS, RANK_COLORS, SHARD_BASE, SHARD_OPACITY, SHARD_HIGHLIGHT_OPACITY } from './shared.js';
+
+function formatDimRange(dimName, start, end, params) {
+    const d_h = params && params.d_h;
+    const n_h = params && params.n_h;
+    const n_kv = params && params.n_kv;
+    if (d_h && d_h > 1) {
+        if (dimName === 'D' && n_h) {
+            return `n_h[${Math.floor(start / d_h)}\u2013${Math.floor(end / d_h)}] (${dimName}[${start}\u2013${end}])`;
+        }
+        if (dimName.includes('\u00b7d_h') && n_kv) {
+            return `n_kv[${Math.floor(start / d_h)}\u2013${Math.floor(end / d_h)}] (${dimName}[${start}\u2013${end}])`;
+        }
+    }
+    return `${dimName}[${start}\u2013${end}]`;
+}
 
 export function drawTensorShapeDetail(svg, tensor, params) {
     const { cx } = detailMetrics();
     const shape = tensor.shape;
     const dimNames = tensor.dimNames || [];
     const gPad = 20;
+    let baseSvgH = 0;
     const g = svg.append('g').attr('transform', `translate(${gPad}, 24)`);
     const mid = cx - gPad;
 
@@ -13,6 +29,10 @@ export function drawTensorShapeDetail(svg, tensor, params) {
     const dpSize = (params && params.dp_size) || 1;
     const isTp = tensor.tpSharded && tpSize > 1;
     const isDp = tensor.dpSharded && dpSize > 1;
+    const isSharded = isTp || isDp;
+    const SHARDED_NEUTRAL = '#f39c12';
+    const NEUTRALIZE_COLORS = new Set(['#e74c3c', '#2ecc71', '#f39c12', '#e67e22']);
+    const effectiveColor = (isSharded && tensor.type !== 'weight' && tensor.type !== 'mask' && NEUTRALIZE_COLORS.has(tensor.color)) ? SHARDED_NEUTRAL : tensor.color;
     const is4D = shape.length === 4 && tensor.type !== 'weight' && tensor.type !== 'mask';
 
     // Shape title
@@ -52,17 +72,17 @@ export function drawTensorShapeDetail(svg, tensor, params) {
     if (shape.length === 2) {
         const [h, w] = detailScale2(shape[0], shape[1]);
         const x = mid - w / 2, y = 36;
-        drawDetailBlock(g, x, y, w, h, tensor.color, tensor.label);
 
         const tpDim = tensor.tpDim;
         const dpFracs = (isDp && tensor.dpBoundaryFracs) || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
         const hasParallelism = (isTp && tpDim != null) || isDp;
+        drawDetailBlock(g, x, y, w, h, effectiveColor, tensor.label, hasParallelism);
         let cellInfoG2d = null;
         const cells2d = [];
 
         function show2dTooltip(info) {
             if (cellInfoG2d) cellInfoG2d.remove();
-            if (!info) { cellInfoG2d = null; return; }
+            if (!info) { cellInfoG2d = null; if (baseSvgH) svg.attr('height', baseSvgH); return; }
             cellInfoG2d = g.append('g');
 
             const parts = [];
@@ -84,21 +104,23 @@ export function drawTensorShapeDetail(svg, tensor, params) {
                 const dpDimLabel = dimNames[0] || 'rows';
                 const dpStart = Math.round(dpFracs[info.dp] * shape[0]);
                 const dpEnd = Math.round(dpFracs[info.dp + 1] * shape[0]) - 1;
-                parts.push(`${dpDimLabel} [${dpStart}\u2013${dpEnd}]`);
+                parts.push(formatDimRange(dpDimLabel, dpStart, dpEnd, params));
             }
             if (isTp && tpDim != null && info.tp != null) {
                 parts.push(`TP Rank ${info.tp}`);
                 const dimLabel = tpDim === 0 ? (dimNames[0] || 'rows') : (dimNames[1] || 'cols');
                 const perRank = Math.round(shape[tpDim] / tpSize);
-                parts.push(`${dimLabel} [${info.tp * perRank}\u2013${(info.tp + 1) * perRank - 1}]`);
+                const tpStart = info.tp * perRank, tpEnd = (info.tp + 1) * perRank - 1;
+                parts.push(formatDimRange(dimLabel, tpStart, tpEnd, params));
             }
             if (isTp && isDp) {
                 parts.unshift(`Rank ${rankIdx}`);
             }
 
             const padX = 10, padY = 8, lineH = 16;
-            const boxW = 150, boxH = padY * 2 + parts.length * lineH;
-            const ttX = x + w + 12, ttY = y + h * 0.2;
+            const boxW = 220, boxH = padY * 2 + parts.length * lineH;
+            const ttX = mid - boxW / 2;
+            const ttY = baseSvgH - 24;
 
             cellInfoG2d.append('rect')
                 .attr('x', ttX).attr('y', ttY)
@@ -113,21 +135,22 @@ export function drawTensorShapeDetail(svg, tensor, params) {
                     .attr('font-size', '11px').attr('font-weight', i === 0 ? '600' : '400')
                     .text(text);
             });
+
+            const tooltipBottom = ttY + boxH + 40;
+            if (tooltipBottom > baseSvgH) svg.attr('height', tooltipBottom);
         }
 
         function highlight2d(key) {
             cells2d.forEach(c => {
                 const match = (key.dp == null || c.dp === key.dp) && (key.tp == null || c.tp === key.tp);
-                if (match) {
-                    c.el.attr('fill-opacity', 0.55).attr('stroke', '#fff').attr('stroke-width', 1.5);
-                } else {
-                    c.el.attr('fill-opacity', 0.3).attr('stroke', 'none');
-                }
+                c.el.attr('fill-opacity', match ? SHARD_HIGHLIGHT_OPACITY : SHARD_OPACITY);
+                if (match) c.el.attr('stroke', '#fff').attr('stroke-width', 1.5);
+                else c.el.attr('stroke', 'none');
             });
         }
 
         function clear2d() {
-            cells2d.forEach(c => c.el.attr('fill-opacity', 0.3).attr('stroke', 'none'));
+            cells2d.forEach(c => c.el.attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none'));
         }
 
         if (hasParallelism) {
@@ -137,10 +160,7 @@ export function drawTensorShapeDetail(svg, tensor, params) {
             for (let dp = 0; dp < effDpSize; dp++) {
                 for (let tp = 0; tp < effTpSize; tp++) {
                     const rankIdx = dp * effTpSize + tp;
-                    const cellColor = (effTpSize > 1 && effDpSize > 1)
-                        ? RANK_COLORS[rankIdx % RANK_COLORS.length]
-                        : effTpSize > 1 ? TP_COLORS[tp % TP_COLORS.length]
-                        : RANK_COLORS[rankIdx % RANK_COLORS.length];
+                    const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
 
                     let sx, sy, sw, sh;
                     if (effDpSize > 1 && effTpSize > 1) {
@@ -169,7 +189,7 @@ export function drawTensorShapeDetail(svg, tensor, params) {
 
                     const cell = g.append('rect')
                         .attr('x', sx).attr('y', sy).attr('width', sw).attr('height', sh)
-                        .attr('fill', cellColor).attr('fill-opacity', 0.3).attr('stroke', 'none')
+                        .attr('fill', cellColor).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none')
                         .style('cursor', 'pointer');
                     cells2d.push({ dp, tp, el: cell });
 
@@ -317,6 +337,7 @@ export function drawTensorShapeDetail(svg, tensor, params) {
         noteY2d += 20;
 
         svg.attr('height', 24 + noteY2d);
+        baseSvgH = 24 + noteY2d;
     } else if (shape.length >= 3) {
         const rawW = shape[shape.length - 1];
         const rawH = shape[shape.length - 2];
@@ -333,13 +354,10 @@ export function drawTensorShapeDetail(svg, tensor, params) {
         const tpInfo = isTp ? { tpSize } : null;
         const dpInfo = isDp ? { dpSize, dpFracs: tensor.dpBoundaryFracs } : null;
 
-        // Floating tooltip for chunk info
         let cellInfoG = null;
-        const tooltipX = x + w + d * 0.7 + 12;
-        const tooltipY = y + h * 0.3;
         function showCellInfo(info) {
             if (cellInfoG) cellInfoG.remove();
-            if (!info) { cellInfoG = null; return; }
+            if (!info) { cellInfoG = null; if (baseSvgH) svg.attr('height', baseSvgH); return; }
             cellInfoG = g.append('g');
             const cellColor = RANK_COLORS[info.rankIdx % RANK_COLORS.length];
             const parts = [];
@@ -352,16 +370,33 @@ export function drawTensorShapeDetail(svg, tensor, params) {
                 parts.push(`Req ${reqs.join(', ')}`);
             }
             parts.push(`Rank ${info.rankIdx}`);
-            if (dpSize > 1) parts.push(`DP ${info.dp}`);
-            if (tpSize > 1 && info.tp != null) parts.push(`TP ${info.tp}`);
+            if (dpSize > 1 && info.dp != null) {
+                parts.push(`DP ${info.dp}`);
+                const dpBoundaryFracs = (tensor.dpBoundaryFracs) || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
+                const rowDim = dimNames[dimNames.length - 2] || 'rows';
+                const rowSize = shape[shape.length - 2];
+                const dpStart = Math.round(dpBoundaryFracs[info.dp] * rowSize);
+                const dpEnd = Math.round(dpBoundaryFracs[info.dp + 1] * rowSize) - 1;
+                parts.push(formatDimRange(rowDim, dpStart, dpEnd, params));
+            }
+            if (tpSize > 1 && info.tp != null) {
+                parts.push(`TP ${info.tp}`);
+                const depthDim = dimNames[0] || 'depth';
+                const depthSize = shape[0];
+                const perRank = Math.round(depthSize / tpSize);
+                const tpStart = info.tp * perRank, tpEnd = (info.tp + 1) * perRank - 1;
+                parts.push(formatDimRange(depthDim, tpStart, tpEnd, params));
+            }
 
             const lineH = 16;
             const padX = 10, padY = 8;
-            const boxW = 130;
+            const boxW = 220;
             const boxH = padY * 2 + parts.length * lineH;
+            const ttX = mid - boxW / 2;
+            const ttY = baseSvgH - 24;
 
             cellInfoG.append('rect')
-                .attr('x', tooltipX).attr('y', tooltipY)
+                .attr('x', ttX).attr('y', ttY)
                 .attr('width', boxW).attr('height', boxH)
                 .attr('rx', 6)
                 .attr('fill', '#12141f').attr('fill-opacity', 0.95)
@@ -370,16 +405,19 @@ export function drawTensorShapeDetail(svg, tensor, params) {
 
             parts.forEach((text, i) => {
                 cellInfoG.append('text')
-                    .attr('x', tooltipX + padX).attr('y', tooltipY + padY + (i + 1) * lineH - 3)
+                    .attr('x', ttX + padX).attr('y', ttY + padY + (i + 1) * lineH - 3)
                     .attr('fill', i === 0 ? cellColor : '#bbb')
                     .attr('font-size', '11px')
                     .attr('font-weight', i === 0 ? '600' : '400')
                     .text(text);
             });
+
+            const tooltipBottom = ttY + boxH + 40;
+            if (tooltipBottom > baseSvgH) svg.attr('height', tooltipBottom);
         }
 
-        drawDetailBlock3D(g, x, y, w, h, d, tensor.color, tensor.label, grp, tpInfo, dpInfo,
-            (isTp || isDp) ? showCellInfo : null);
+        drawDetailBlock3D(g, x, y, w, h, d, effectiveColor, tensor.label, grp, tpInfo, dpInfo,
+            (isTp || isDp) ? showCellInfo : null, tensor.color);
 
         // Request boundary lines (when B > 1)
         if (tensor.requestBoundaries && tensor.requestBoundaries.length > 0) {
@@ -551,6 +589,7 @@ export function drawTensorShapeDetail(svg, tensor, params) {
         noteY += 20;
 
         svg.attr('height', noteY + 34);
+        baseSvgH = noteY + 34;
     } else {
         svg.attr('height', 50);
     }

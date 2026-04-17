@@ -18,6 +18,11 @@ export const RANK_COLORS = [
     '#ff6b9d','#51cf66','#ffd43b','#845ef7','#339af0','#ff922b','#20c997','#f06595',
 ];
 
+// Centralized sharding visual constants — one source of truth for all renderers.
+export const SHARD_BASE = '#1e2030';
+export const SHARD_OPACITY = 0.65;
+export const SHARD_HIGHLIGHT_OPACITY = 0.85;
+
 // --- Scale ---
 
 // Module-level scale factor: computed from the max dimension across all
@@ -104,14 +109,21 @@ export function tensorBounds(shape) {
 
 // --- Draw tensor block ---
 
+const SHARDED_NEUTRAL = '#f39c12';
+const NEUTRALIZE_COLORS = new Set(['#e74c3c', '#2ecc71', '#f39c12', '#e67e22']);
+
 export function drawTensorBlock(g, x, y, tensor, dimNames) {
-    const { shape, color, label, type, id } = tensor;
+    const { shape, label, type, id } = tensor;
+    const isSharded = (tensor.tpSharded && tensor.tpSize > 1) || (tensor.dpSharded && tensor.dpSize > 1);
+    const color = (isSharded && type !== 'weight' && type !== 'mask' && NEUTRALIZE_COLORS.has(tensor.color)) ? SHARDED_NEUTRAL : tensor.color;
     const { w, h, d } = tensorGeometry(shape);
     const off = depthOffset(d);
 
     const group = g.append('g')
         .attr('class', 'tensor-block')
         .attr('data-id', id);
+
+    const _hasSharding = isSharded && type !== 'mask';
 
     if (d > 0) {
         // Top face
@@ -120,7 +132,7 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
                 [x, y], [x + off.dx, y + off.dy],
                 [x + w + off.dx, y + off.dy], [x + w, y]
             ]))
-            .attr('fill', d3.color(color).darker(0.4))
+            .attr('fill', _hasSharding ? SHARD_BASE : d3.color(color).darker(0.4))
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
             .attr('stroke-width', 1);
 
@@ -130,7 +142,7 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
                 [x + w, y], [x + w + off.dx, y + off.dy],
                 [x + w + off.dx, y + h + off.dy], [x + w, y + h]
             ]))
-            .attr('fill', d3.color(color).darker(0.8))
+            .attr('fill', _hasSharding ? SHARD_BASE : d3.color(color).darker(0.8))
             .attr('stroke', type === 'weight' ? '#aaa' : 'none')
             .attr('stroke-width', 1);
 
@@ -161,25 +173,27 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
         const frontRect = group.append('rect')
             .attr('x', x).attr('y', y)
             .attr('width', w).attr('height', h)
-            .attr('fill', type === 'weight' ? d3.color(color).brighter(0.3) : color)
-            .attr('fill-opacity', type === 'weight' ? 0.5 : 0.85);
+            .attr('fill', _hasSharding ? SHARD_BASE : (type === 'weight' ? d3.color(color).brighter(0.3) : color))
+            .attr('fill-opacity', _hasSharding ? 1 : (type === 'weight' ? 0.5 : 0.85));
         if (type === 'weight') {
             frontRect.attr('stroke', '#aaa').attr('stroke-width', 1.5);
         } else if (d === 0) {
-            // Only stroke flat (2D) tensors — 3D faces define their own edges
             frontRect.attr('stroke', d3.color(color).darker(0.3))
                 .attr('stroke-width', 1);
         }
     }
 
-    // DP sharding stripes on front face
-    if (tensor.dpSharded && tensor.dpSize > 1 && type !== 'mask') {
-        drawDpFrontStripes(group, x, y, w, h, tensor.dpSize, tensor.tpSize || 1, tensor.dpBoundaryFracs);
-    }
-
-    // TP sharding stripes on 2D tensor front face
-    if (d === 0 && tensor.tpSharded && tensor.tpSize > 1 && tensor.tpDim != null && type !== 'mask') {
-        drawTpFrontStripes(group, x, y, w, h, tensor.tpSize, tensor.tpDim);
+    // Front face sharding (combined DP + TP grid)
+    const _dpFront = tensor.dpSharded && tensor.dpSize > 1;
+    const _tpFront = d === 0 && tensor.tpSharded && tensor.tpSize > 1 && tensor.tpDim != null;
+    if (_hasSharding) {
+        const _realTp = (tensor.tpSharded && tensor.tpSize > 1) ? tensor.tpSize : 1;
+        drawFrontSharding(group, x, y, w, h,
+            _dpFront ? tensor.dpSize : 1,
+            _tpFront ? tensor.tpSize : 1,
+            _tpFront ? tensor.tpDim : null,
+            tensor.dpBoundaryFracs,
+            _realTp);
     }
 
     // Request boundary lines (when B > 1)
@@ -259,7 +273,7 @@ function drawTpStripes(group, rx, fy, off, h, tpSize) {
                 [rx + r * (off.dx / tpSize), fy + h + r * (off.dy / tpSize)],
             ]))
             .attr('fill', TP_COLORS[r % TP_COLORS.length])
-            .attr('fill-opacity', 0.5)
+            .attr('fill-opacity', SHARD_OPACITY)
             .attr('stroke', 'none');
     }
 }
@@ -291,7 +305,7 @@ function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
                     [rx + off.dx * f0, y + h + off.dy * f0],
                 ]))
                 .attr('fill', color)
-                .attr('fill-opacity', 0.5)
+                .attr('fill-opacity', SHARD_OPACITY)
                 .attr('stroke', 'none');
 
             // Top face stripe
@@ -303,7 +317,7 @@ function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
                     [x + w + off.dx * f0, y + off.dy * f0],
                 ]))
                 .attr('fill', color)
-                .attr('fill-opacity', 0.35)
+                .attr('fill-opacity', SHARD_OPACITY)
                 .attr('stroke', 'none');
         }
     }
@@ -332,54 +346,65 @@ function draw4DTpDepth(group, x, y, w, h, off, B, n_h, tpSize) {
 
 // --- DP front face stripes ---
 
-function drawDpFrontStripes(group, x, y, w, h, dpSize, tpSize, dpFracs) {
+function drawFrontSharding(group, x, y, w, h, dpSize, tpSize, tpDim, dpFracs, realTpSize) {
     const fracs = dpFracs || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
-    for (let dp = 0; dp < dpSize; dp++) {
-        const rankIdx = dp * tpSize;
-        const bandY = y + fracs[dp] * h;
-        const bandH = (fracs[dp + 1] - fracs[dp]) * h;
-        group.append('rect')
-            .attr('x', x).attr('y', bandY)
-            .attr('width', w).attr('height', bandH)
-            .attr('fill', RANK_COLORS[rankIdx % RANK_COLORS.length])
-            .attr('fill-opacity', 0.4)
-            .attr('stroke', 'none');
-    }
-    for (let dp = 1; dp < dpSize; dp++) {
-        const ly = y + fracs[dp] * h;
-        group.append('line')
-            .attr('x1', x).attr('y1', ly)
-            .attr('x2', x + w).attr('y2', ly)
-            .attr('stroke', '#fff').attr('stroke-width', 0.75)
-            .attr('stroke-opacity', 0.4);
-    }
-}
+    const effDp = dpSize > 1 ? dpSize : 1;
+    const effTp = (tpSize > 1 && tpDim != null) ? tpSize : 1;
+    const rankTp = realTpSize || effTp;
 
-function drawTpFrontStripes(group, x, y, w, h, tpSize, tpDim) {
-    for (let tp = 0; tp < tpSize; tp++) {
-        const color = TP_COLORS[tp % TP_COLORS.length];
-        if (tpDim === 1) {
-            const sx = x + (tp / tpSize) * w;
-            const sw = w / tpSize;
+    for (let dp = 0; dp < effDp; dp++) {
+        for (let tp = 0; tp < effTp; tp++) {
+            const rankIdx = dp * rankTp + tp;
+            const color = RANK_COLORS[rankIdx % RANK_COLORS.length];
+
+            let sx, sy, sw, sh;
+            if (effDp > 1 && effTp > 1) {
+                const dpY0 = fracs[dp] * h, dpY1 = fracs[dp + 1] * h;
+                if (tpDim === 1) {
+                    sx = x + (tp / effTp) * w; sy = y + dpY0;
+                    sw = w / effTp; sh = dpY1 - dpY0;
+                } else {
+                    sx = x; sy = y + dpY0 + (tp / effTp) * (dpY1 - dpY0);
+                    sw = w; sh = (dpY1 - dpY0) / effTp;
+                }
+            } else if (effTp > 1) {
+                if (tpDim === 1) {
+                    sx = x + (tp / effTp) * w; sy = y; sw = w / effTp; sh = h;
+                } else {
+                    sx = x; sy = y + (tp / effTp) * h; sw = w; sh = h / effTp;
+                }
+            } else {
+                const dpY0 = fracs[dp] * h, dpY1 = fracs[dp + 1] * h;
+                sx = x; sy = y + dpY0; sw = w; sh = dpY1 - dpY0;
+            }
+
             group.append('rect')
-                .attr('x', sx).attr('y', y).attr('width', sw).attr('height', h)
-                .attr('fill', color).attr('fill-opacity', 0.3).attr('stroke', 'none');
-        } else {
-            const sy = y + (tp / tpSize) * h;
-            const sh = h / tpSize;
-            group.append('rect')
-                .attr('x', x).attr('y', sy).attr('width', w).attr('height', sh)
-                .attr('fill', color).attr('fill-opacity', 0.3).attr('stroke', 'none');
+                .attr('x', sx).attr('y', sy).attr('width', sw).attr('height', sh)
+                .attr('fill', color).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none');
         }
     }
-    for (let tp = 1; tp < tpSize; tp++) {
-        if (tpDim === 1) {
-            const lx = x + (tp / tpSize) * w;
-            group.append('line')
-                .attr('x1', lx).attr('y1', y).attr('x2', lx).attr('y2', y + h)
-                .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-        } else {
-            const ly = y + (tp / tpSize) * h;
+
+    // TP boundary lines
+    if (effTp > 1) {
+        for (let tp = 1; tp < effTp; tp++) {
+            if (tpDim === 1) {
+                const lx = x + (tp / effTp) * w;
+                group.append('line')
+                    .attr('x1', lx).attr('y1', y).attr('x2', lx).attr('y2', y + h)
+                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+            } else {
+                const ly = y + (tp / effTp) * h;
+                group.append('line')
+                    .attr('x1', x).attr('y1', ly).attr('x2', x + w).attr('y2', ly)
+                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+            }
+        }
+    }
+
+    // DP boundary lines
+    if (effDp > 1) {
+        for (let dp = 1; dp < effDp; dp++) {
+            const ly = y + fracs[dp] * h;
             group.append('line')
                 .attr('x1', x).attr('y1', ly).attr('x2', x + w).attr('y2', ly)
                 .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
@@ -409,13 +434,13 @@ function drawParallelismDepthFaces(group, x, y, w, h, off, tpSize, dpSize, skipT
                     [rx + off.dx * tf0, y + h * df1 + off.dy * tf0],
                 ]))
                 .attr('fill', color)
-                .attr('fill-opacity', 0.5)
+                .attr('fill-opacity', SHARD_OPACITY)
                 .attr('stroke', 'none');
         }
     }
 
-    // Top face: tp bands along depth (dp doesn't divide this surface)
-    if (!skipTopFace && tpSize > 1) {
+    // Top face: tp bands along depth (or single rank-0 overlay when TP=1)
+    if (!skipTopFace) {
         for (let tp = 0; tp < tpSize; tp++) {
             const color = RANK_COLORS[tp % RANK_COLORS.length];
             const tf0 = tp / tpSize, tf1 = (tp + 1) / tpSize;
@@ -428,7 +453,7 @@ function drawParallelismDepthFaces(group, x, y, w, h, off, tpSize, dpSize, skipT
                     [x + w + off.dx * tf0, y + off.dy * tf0],
                 ]))
                 .attr('fill', color)
-                .attr('fill-opacity', 0.35)
+                .attr('fill-opacity', SHARD_OPACITY)
                 .attr('stroke', 'none');
         }
     }

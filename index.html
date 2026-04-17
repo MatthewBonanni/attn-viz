@@ -323,9 +323,14 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
         <h2>Legend</h2>
         <div class="legend-item"><div class="legend-swatch" style="background:#4a90d9"></div>Activation</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#7b68ee;opacity:0.6"></div>Weight (dashed)</div>
-        <div class="legend-item"><div class="legend-swatch" style="background:#e74c3c"></div>Query</div>
-        <div class="legend-item"><div class="legend-swatch" style="background:#2ecc71"></div>Key</div>
-        <div class="legend-item"><div class="legend-swatch" style="background:#f39c12"></div>Value</div>
+        <div id="legend-qkv-separate">
+            <div class="legend-item"><div class="legend-swatch" style="background:#e74c3c"></div>Query</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#2ecc71"></div>Key</div>
+            <div class="legend-item"><div class="legend-swatch" style="background:#f39c12"></div>Value</div>
+        </div>
+        <div id="legend-qkv-unified" style="display:none">
+            <div class="legend-item"><div class="legend-swatch" style="background:#f39c12"></div>Q / K / V</div>
+        </div>
         <div class="legend-item"><div class="legend-swatch" style="background:#9b59b6"></div>Attention scores</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#1abc9c"></div>Causal mask</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#e67e22"></div>Latent / compressed</div>

@@ -607,6 +607,10 @@ function updateDerived() {
         rtHtml += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
     }
     d3.select('#derived-runtime').html(rtHtml);
+
+    const sharded = params.tp_size > 1 || params.dp_size > 1;
+    d3.select('#legend-qkv-separate').style('display', sharded ? 'none' : null);
+    d3.select('#legend-qkv-unified').style('display', sharded ? null : 'none');
 }
 
 // --- Pipeline stats overlay ---

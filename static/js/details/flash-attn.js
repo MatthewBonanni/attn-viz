@@ -132,7 +132,7 @@ function buildHTMLControls(container, params, isGQA, onChange) {
     // Split-KV toggle
     const splitGroup = row.append('div').style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
     splitGroup.append('span')
-        .style('font-size', '11px').style('color', '#bbb').style('font-weight', '500')
+        .style('font-size', '12px').style('color', '#bbb').style('font-weight', '500')
         .text('Split-KV');
     const splitToggle = splitGroup.append('div')
         .attr('class', 'toggle-switch')
@@ -148,7 +148,7 @@ function buildHTMLControls(container, params, isGQA, onChange) {
     if (isGQA) {
         const packGroup = row.append('div').style('display', 'flex').style('flex-direction', 'column').style('gap', '4px');
         packGroup.append('span')
-            .style('font-size', '11px').style('color', '#bbb').style('font-weight', '500')
+            .style('font-size', '12px').style('color', '#bbb').style('font-weight', '500')
             .text('PackGQA');
         const packToggle = packGroup.append('div')
             .attr('class', 'toggle-switch')
@@ -165,7 +165,7 @@ function buildHTMLControls(container, params, isGQA, onChange) {
     container.append('div')
         .attr('class', 'flash-stats')
         .style('margin-top', '8px')
-        .style('font-size', '11px')
+        .style('font-size', '12px')
         .style('color', '#888');
 }
 
@@ -243,7 +243,7 @@ function updateControlStats(container, params, S_q, S, op, tensorMap, isGQA, G, 
     const gpuKeys = Object.keys(GPU_SPECS);
     const table = stats.append('table')
         .style('width', '100%').style('border-collapse', 'collapse')
-        .style('font-size', '10px').style('margin-top', '4px');
+        .style('font-size', '12px').style('margin-top', '4px');
     const thead = table.append('tr');
     for (const h of ['GPU', 'Compute', 'Memory', 'Bound', 'Time']) {
         thead.append('td')
@@ -326,12 +326,12 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     //              K^T [d_k × S]      V [S × d_v]
     //  Q [S_q×d_q]  S/P [S_q × S]    O [S_q × d_v]
     const headerH = 28;
-    const topLabelH = 14;
-    const gapInner = 3;
-    const softmaxGap = 14;
-    const leftMargin = 40;
-    const minPx = 16;
-    const maxH = 160;
+    const topLabelH = 20;
+    const gapInner = 6;
+    const softmaxGap = 20;
+    const leftMargin = 50;
+    const minPx = 32;
+    const maxH = 340;
     const pow = 0.4;
 
     const rawSq = Math.pow(S_q, pow);
@@ -351,11 +351,9 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     const pxSq = Math.max(minPx, rawSq * k);
     const pxDv = Math.max(minPx, rawDv * k);
 
-    // Center horizontally
-    const totalW = leftMargin + pxDq + gapInner + pxS + softmaxGap + pxDv + stackW;
-    const offX = (width - totalW) / 2;
-
-    const col0X = offX + leftMargin;
+    // Center the blocks themselves; labels extend left
+    const blocksW = pxDq + gapInner + pxS + softmaxGap + pxDv + stackW;
+    const col0X = Math.max(leftMargin, (width - blocksW) / 2);
     const col1X = col0X + pxDq + gapInner;
     const col2X = col1X + pxS + softmaxGap;
 
@@ -409,7 +407,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
                 sectionG.append('text')
                     .attr('x', blk.bx + blk.bw / 2).attr('y', mainY + 10)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', '#aaa').attr('font-size', '7px')
+                    .attr('fill', '#aaa').attr('font-size', '11px')
                     .text(`(${blk.sublabel})`);
             }
         }
@@ -420,7 +418,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     sectionG.append('text')
         .attr('x', ktBlk.bx + ktBlk.bw / 2).attr('y', ktBlk.by - stackH - 4)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#2ecc71').attr('font-size', '9px').attr('font-weight', '600')
+        .attr('fill', '#2ecc71').attr('font-size', '11px').attr('font-weight', '600')
         .text(K.label + '\u1d40');
 
     const vBlk = blocks.find(b => b.id === 'V');
@@ -428,7 +426,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
         sectionG.append('text')
             .attr('x', vBlk.bx + vBlk.bw / 2).attr('y', vBlk.by - stackH - 4)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#f39c12').attr('font-size', '9px').attr('font-weight', '600')
+            .attr('fill', '#f39c12').attr('font-size', '11px').attr('font-weight', '600')
             .text(V.label);
     }
 
@@ -436,25 +434,25 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     sectionG.append('text')
         .attr('x', qBlk.bx - 4).attr('y', qBlk.by + qBlk.bh / 2 + 3)
         .attr('text-anchor', 'end')
-        .attr('fill', '#e74c3c').attr('font-size', '9px').attr('font-weight', '600')
+        .attr('fill', '#e74c3c').attr('font-size', '11px').attr('font-weight', '600')
         .text(Q.label);
 
     // --- Dimension labels ---
     sectionG.append('text')
         .attr('x', qBlk.bx - 4).attr('y', qBlk.by + 8)
         .attr('text-anchor', 'end')
-        .attr('fill', '#555').attr('font-size', '7px')
+        .attr('fill', '#555').attr('font-size', '11px')
         .text(`S_q=${S_q}`);
     sectionG.append('text')
         .attr('x', qBlk.bx + qBlk.bw / 2).attr('y', qBlk.by + qBlk.bh + 10)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#555').attr('font-size', '7px')
+        .attr('fill', '#555').attr('font-size', '11px')
         .text(`d=${d_q}`);
     const spBlk = blocks.find(b => b.id === 'SP');
     sectionG.append('text')
         .attr('x', spBlk.bx + spBlk.bw / 2).attr('y', spBlk.by + spBlk.bh + 10)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#555').attr('font-size', '7px')
+        .attr('fill', '#555').attr('font-size', '11px')
         .text(`S=${S}`);
 
     // --- Softmax arrow in the gap ---
@@ -463,7 +461,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     sectionG.append('text')
         .attr('x', softX).attr('y', softY)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#f39c12').attr('font-size', '7px').attr('font-weight', '600')
+        .attr('fill', '#f39c12').attr('font-size', '11px').attr('font-weight', '600')
         .attr('transform', `rotate(-90, ${softX}, ${softY})`)
         .text('softmax \u2192');
 
@@ -501,7 +499,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
         const midY = (backY + frontY) / 2 + py + 3;
         sectionG.append('text')
             .attr('x', midX).attr('y', midY)
-            .attr('fill', '#aaa').attr('font-size', '8px')
+            .attr('fill', '#aaa').attr('font-size', '12px')
             .text(`n_h=${n_h}`);
     }
 
@@ -518,7 +516,7 @@ function drawPerHeadOverview(g, x, y, width, n_h, S_q, S, d_q, d_v, Q, K, V, O, 
     sectionG.append('text')
         .attr('x', width / 2).attr('y', annoY)
         .attr('text-anchor', 'middle')
-        .attr('fill', packed ? '#e67e22' : '#f39c12').attr('font-size', '10px').attr('font-style', 'italic')
+        .attr('fill', packed ? '#e67e22' : '#f39c12').attr('font-size', '12px').attr('font-style', 'italic')
         .text(headText);
 
     return y + annoY + 8;
@@ -545,23 +543,27 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
         .attr('x', 0).attr('y', 14)
         .attr('fill', packed ? '#e67e22' : '#bbb').attr('font-size', '12px').attr('font-weight', '600')
         .text(titleText);
+    sectionG.append('text')
+        .attr('x', 0).attr('y', 28)
+        .attr('fill', '#666').attr('font-size', '12px').attr('font-style', 'italic')
+        .text('Click a cell to see its tile details');
 
-    const titleH = 24;
+    const titleH = 38;
     const labelW = 60;
     const labelH = 20;
     const dpLabelMargin = (effectiveDp > 1) ? 36 : 0;
 
-    // Compute cell size to fit
-    const maxGridW = width - labelW - dpLabelMargin - 10;
-    const maxGridH = 180;
-    const cellW = Math.min(40, maxGridW / numKVBlocks);
-    const cellH = Math.min(28, maxGridH / numQBlocks);
+    // Compute cell size to fit — square cells so the grid is square
+    const maxGridW = width - 20;
+    const maxGridH = 400;
+    const cellSize = Math.min(40, maxGridW / numKVBlocks, maxGridH / numQBlocks);
+    const cellW = cellSize;
+    const cellH = cellSize;
     const gridW = cellW * numKVBlocks;
     const gridH = cellH * numQBlocks;
 
-    // Center the grid (labels + cells + DP margin) within the available width
-    const totalGridW = labelW + gridW + dpLabelMargin;
-    const gridX = labelW + Math.max(0, (width - totalGridW) / 2);
+    // Center the grid itself in the full width; labels are placed relative to it
+    const gridX = (width - gridW) / 2;
     const gridY = titleH + labelH;
 
     // Column headers (KV blocks)
@@ -572,7 +574,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
                 .attr('x', gridX + j * cellW + cellW / 2)
                 .attr('y', titleH + labelH - 4)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#666').attr('font-size', '9px')
+                .attr('fill', '#666').attr('font-size', '11px')
                 .text(cellW >= 24 ? `KV ${j}` : j);
         }
     }
@@ -584,7 +586,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
                 .attr('x', gridX - 6)
                 .attr('y', gridY + i * cellH + cellH / 2 + 3)
                 .attr('text-anchor', 'end')
-                .attr('fill', '#666').attr('font-size', '9px')
+                .attr('fill', '#666').attr('font-size', '11px')
                 .text(cellH >= 20 ? `Q ${i}` : i);
         }
     }
@@ -675,7 +677,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
                     .attr('y', gridY + i * cellH + cellH / 2 + 3)
                     .attr('text-anchor', 'middle')
                     .attr('fill', causallyReachable ? '#fff' : '#444')
-                    .attr('font-size', '8px')
+                    .attr('font-size', '12px')
                     .attr('pointer-events', 'none')
                     .text(splitKV ? `CTA${ctaId}` : (j === 0 ? `CTA${ctaId}` : `iter${j}`));
             }
@@ -741,7 +743,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
             if (rw >= 8 && rh >= 8) {
                 sectionG.append('text')
                     .attr('x', labelX).attr('y', labelY)
-                    .attr('fill', rankColor).attr('font-size', '9px').attr('font-weight', '600')
+                    .attr('fill', rankColor).attr('font-size', '11px').attr('font-weight', '600')
                     .attr('pointer-events', 'none')
                     .text(`DP${dp}`);
             }
@@ -753,7 +755,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     const gridCenterX = gridX + gridW / 2;
     const legendG = sectionG.append('g').attr('transform', `translate(${gridX}, ${legendY})`);
     legendG.append('rect').attr('width', 8).attr('height', 8).attr('fill', '#1a1d2a').attr('stroke', '#2a2d3a').attr('rx', 1);
-    legendG.append('text').attr('x', 12).attr('y', 7).attr('fill', '#666').attr('font-size', '9px')
+    legendG.append('text').attr('x', 12).attr('y', 7).attr('fill', '#666').attr('font-size', '11px')
         .text('Skipped (causal mask)');
 
     const qRange = `[${selectedQ * Br}..${Math.min((selectedQ + 1) * Br, S_q) - 1}]`;
@@ -772,7 +774,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     sectionG.append('text')
         .attr('x', gridCenterX).attr('y', legendY + 20)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#aaa').attr('font-size', '10px')
+        .attr('fill', '#aaa').attr('font-size', '12px')
         .text(selText);
 
     let bottomY = gridY + gridH + 38;
@@ -782,14 +784,14 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
         sectionG.append('text')
             .attr('x', width / 2).attr('y', bottomY)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#7c8cf8').attr('font-size', '9px').attr('font-style', 'italic')
+            .attr('fill', '#7c8cf8').attr('font-size', '11px').attr('font-style', 'italic')
             .text(`${effectiveDp} DP ranks — each rank runs CTAs only within its dashed region (no cross-rank attention)`);
         bottomY += 16;
         if (dpSize > B) {
             sectionG.append('text')
                 .attr('x', width / 2).attr('y', bottomY)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#e67e22').attr('font-size', '9px')
+                .attr('fill', '#e67e22').attr('font-size', '11px')
                 .text(`${dpSize - B} idle DP rank${dpSize - B !== 1 ? 's' : ''} (DP ≥ ${B} = batch size)`);
             bottomY += 16;
         }
@@ -800,7 +802,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
         sectionG.append('text')
             .attr('x', width / 2).attr('y', bottomY)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#e67e22').attr('font-size', '9px').attr('font-style', 'italic')
+            .attr('fill', '#e67e22').attr('font-size', '11px').attr('font-style', 'italic')
             .text(`Each CTA processes ${G} query heads (h₀..h₍${G-1}₎) sharing the same KV head \u2014 K/V tiles loaded once per group`);
         bottomY += 16;
     }
@@ -832,12 +834,12 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
     // S/P is the attention matrix — dashed, never materialized to HBM.
 
     const headerH = 28;
-    const topLabelH = 16;
-    const gapInner = 4;
-    const softmaxGap = 18;
-    const leftMargin = 55;
-    const minPx = 24;
-    const maxH = 280;
+    const topLabelH = 20;
+    const gapInner = 6;
+    const softmaxGap = 24;
+    const leftMargin = 60;
+    const minPx = 32;
+    const maxH = 420;
     const pow = 0.4;
 
     // Compressed dimension mapping (power scale to handle S >> d)
@@ -858,11 +860,9 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
     const pxSq = Math.max(minPx, rawSq * k);
     const pxDv = Math.max(minPx, rawDv * k);
 
-    // Center horizontally
-    const totalW = leftMargin + pxDq + gapInner + pxS + softmaxGap + pxDv;
-    const offX = (width - totalW) / 2;
-
-    const col0X = offX + leftMargin;
+    // Center the blocks themselves; labels extend left
+    const blocksW = pxDq + gapInner + pxS + softmaxGap + pxDv;
+    const col0X = Math.max(leftMargin, (width - blocksW) / 2);
     const col1X = col0X + pxDq + gapInner;
     const col2X = col1X + pxS + softmaxGap;
 
@@ -909,7 +909,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
             sectionG.append('text')
                 .attr('x', tx + tw / 2).attr('y', ty + th / 2 + 3)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#fff').attr('font-size', '9px').attr('font-weight', '600')
+                .attr('fill', '#fff').attr('font-size', '11px').attr('font-weight', '600')
                 .text(tileLabel);
         }
 
@@ -930,7 +930,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
                 .attr('stroke', '#888').attr('stroke-width', 1);
             sectionG.append('text')
                 .attr('x', bkX + 3).attr('y', ty + th / 2 + 3)
-                .attr('fill', '#aaa').attr('font-size', '7px')
+                .attr('fill', '#aaa').attr('font-size', '11px')
                 .text(`${tileRow}:${tileRow + tileRows - 1}`);
         }
 
@@ -952,7 +952,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
             sectionG.append('text')
                 .attr('x', tx + tw / 2).attr('y', bkY + 10)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#aaa').attr('font-size', '7px')
+                .attr('fill', '#aaa').attr('font-size', '11px')
                 .text(`${tileCol}:${tileCol + tileCols - 1}`);
         }
     }
@@ -997,7 +997,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
             sectionG.append('text')
                 .attr('x', knewX + knewW / 2).attr('y', ktBy - 2)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#888').attr('font-size', '7px')
+                .attr('fill', '#888').attr('font-size', '11px')
                 .text('K_new');
         }
 
@@ -1014,7 +1014,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
             sectionG.append('text')
                 .attr('x', vBx - 6).attr('y', vBy + vBh * (1 - newFrac) + vnewH / 2 + 3)
                 .attr('text-anchor', 'end')
-                .attr('fill', '#888').attr('font-size', '7px')
+                .attr('fill', '#888').attr('font-size', '11px')
                 .text('V_new');
         }
     }
@@ -1023,49 +1023,49 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
     sectionG.append('text')
         .attr('x', ktBx + ktBw / 2).attr('y', ktBy - 5)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#2ecc71').attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', '#2ecc71').attr('font-size', '12px').attr('font-weight', '600')
         .text(K.label + '\u1d40');
     sectionG.append('text')
         .attr('x', vBx + vBw / 2).attr('y', vBy - 5)
         .attr('text-anchor', 'middle')
-        .attr('fill', vColor).attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', vColor).attr('font-size', '12px').attr('font-weight', '600')
         .text(V.label);
     sectionG.append('text')
         .attr('x', qBx - 6).attr('y', qBy + qBh / 2 + 3)
         .attr('text-anchor', 'end')
-        .attr('fill', '#e74c3c').attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', '#e74c3c').attr('font-size', '12px').attr('font-weight', '600')
         .text(Q.label);
 
     // --- Dimension labels on edges ---
     sectionG.append('text')
-        .attr('x', qBx - 6).attr('y', qBy + 8)
+        .attr('x', qBx - 6).attr('y', qBy + qBh - 4)
         .attr('text-anchor', 'end')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`S_q=${S_q}`);
     sectionG.append('text')
         .attr('x', qBx + qBw / 2).attr('y', qBy + qBh + 12)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`d=${d_q}`);
     sectionG.append('text')
         .attr('x', ktBx - 6).attr('y', ktBy + ktBh / 2 + 3)
         .attr('text-anchor', 'end')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`d=${d_k}`);
     sectionG.append('text')
         .attr('x', sBx + sBw / 2).attr('y', sBy + sBh + 12)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`S=${S}`);
     sectionG.append('text')
         .attr('x', vBx - 6).attr('y', vBy + vBh / 2 + 3)
         .attr('text-anchor', 'end')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`S=${S}`);
     sectionG.append('text')
         .attr('x', oBx + oBw / 2).attr('y', oBy + oBh + 12)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#666').attr('font-size', '7px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(`d=${d_v}`);
 
     // --- Softmax label (rotated, in the gap between S/P and O columns) ---
@@ -1074,30 +1074,25 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
     sectionG.append('text')
         .attr('x', softX).attr('y', softY)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#f39c12').attr('font-size', '8px').attr('font-weight', '600')
+        .attr('fill', '#f39c12').attr('font-size', '12px').attr('font-weight', '600')
         .attr('transform', `rotate(-90, ${softX}, ${softY})`)
         .text('softmax \u2192');
 
     // --- Equation labels below ---
     const bottomY = resultY + pxSq;
-    const eqY = bottomY + 26;
+    const eqY = bottomY + 30;
     sectionG.append('text')
-        .attr('x', (col0X + col1X + pxS) / 2).attr('y', eqY)
+        .attr('x', width / 2).attr('y', eqY)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#888').attr('font-size', '10px')
-        .text('S = Q_i \u00d7 K_j\u1d40');
-    sectionG.append('text')
-        .attr('x', (col1X + col2X + pxDv) / 2).attr('y', eqY)
-        .attr('text-anchor', 'middle')
-        .attr('fill', '#888').attr('font-size', '10px')
-        .text('O_i = P_ij \u00d7 V_j');
+        .attr('fill', '#888').attr('font-size', '12px')
+        .text('S = Q_i \u00d7 K_j\u1d40     \u2192     softmax     \u2192     O_i = P_ij \u00d7 V_j');
 
     // Note about S/P never being materialized
-    let noteY = eqY + 14;
+    let noteY = eqY + 18;
     sectionG.append('text')
         .attr('x', width / 2).attr('y', noteY)
         .attr('text-anchor', 'middle')
-        .attr('fill', '#9b59b6').attr('font-size', '9px').attr('font-style', 'italic')
+        .attr('fill', '#9b59b6').attr('font-size', '11px').attr('font-style', 'italic')
         .text('S/P (dashed) is never materialized to HBM \u2014 computed and consumed in SRAM per tile');
 
     let totalH = noteY + 8;
@@ -1106,7 +1101,7 @@ function drawTensorMapping(g, x, y, width, params, Q, K, V, O,
         sectionG.append('text')
             .attr('x', width / 2).attr('y', noteY + 14)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#666').attr('font-size', '9px').attr('font-style', 'italic')
+            .attr('fill', '#666').attr('font-size', '11px').attr('font-style', 'italic')
             .text('Absorbed MLA \u2014 K and V share the same latent');
     }
 
@@ -1148,7 +1143,7 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
     }
     sectionG.append('text')
         .attr('x', 0).attr('y', 26)
-        .attr('fill', '#666').attr('font-size', '9px')
+        .attr('fill', '#666').attr('font-size', '11px')
         .text(tileSubtext);
 
     const topY = 36;
@@ -1157,8 +1152,8 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
 
     const allDims = [actBr, actBc, d_q, d_k, d_v];
     const maxDim = Math.max(...allDims);
-    const minPx = 24;
-    const maxPx = packed ? 70 : 90; // slightly smaller when packed to fit G heads
+    const minPx = 36;
+    const maxPx = packed ? 90 : 120;
     function dimToPx(d) { return Math.max(minPx, (d / maxDim) * maxPx); }
 
     const qW = dimToPx(d_q), qH = dimToPx(actBr);
@@ -1184,12 +1179,12 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
                 hi === 0 ? `Q_i^(h0)` : `Q_i^(h${hi})`, hi === 0 ? `[${actBr}, ${d_q}]` : null, opacity);
         }
         sectionG.append('text').attr('x', qX + qW / 2 + totalStackH / 2).attr('y', qY + qH + 14)
-            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '9px')
+            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '11px')
             .text(`${G} heads \u2192 SMEM`);
     } else {
         drawTileBlock(sectionG, qX, qY, qW, qH, '#e74c3c', `Q_i`, `[${actBr}, ${d_q}]`);
         sectionG.append('text').attr('x', qX + qW / 2).attr('y', qY + qH + 14)
-            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
+            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '11px')
             .text('HBM \u2192 SMEM (once)');
     }
 
@@ -1199,14 +1194,14 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
     drawTileBlock(sectionG, kvX, kjY, kW, kH, '#2ecc71', `K_j`, `[${actBc}, ${d_k}]`);
     const kvNote = packed ? `HBM \u2192 SMEM (shared \u00d7${G})` : 'HBM \u2192 SMEM (each iter)';
     sectionG.append('text').attr('x', kvX + kW / 2).attr('y', kjY + kH + 14)
-        .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '9px')
+        .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '11px')
         .text(kvNote);
 
-    const vjY = kjY + kH + 24;
+    const vjY = kjY + kH + 32;
     if (!sameKV) {
         drawTileBlock(sectionG, kvX, vjY, vW, vH, '#f39c12', `V_j`, `[${actBc}, ${d_v}]`);
         sectionG.append('text').attr('x', kvX + vW / 2).attr('y', vjY + vH + 14)
-            .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '9px')
+            .attr('text-anchor', 'middle').attr('fill', packed ? '#e67e22' : '#888').attr('font-size', '11px')
             .text(kvNote);
     }
 
@@ -1226,7 +1221,7 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
         drawTileBlock(sectionG, sramX, sramY1, sW, sH, '#9b59b6', `S_ij`, `[${actBr}, ${actBc}]`);
     }
     sectionG.append('text').attr('x', midX).attr('y', sramY1 - 6)
-        .attr('text-anchor', 'middle').attr('fill', '#9b59b6').attr('font-size', '9px').attr('font-weight', '600')
+        .attr('text-anchor', 'middle').attr('fill', '#9b59b6').attr('font-size', '11px').attr('font-weight', '600')
         .text('SRAM only');
 
     // Arrow Q -> S
@@ -1237,7 +1232,7 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
     // Softmax label
     const softY = sramY1 + sH + 8;
     sectionG.append('text').attr('x', midX).attr('y', softY + 10)
-        .attr('text-anchor', 'middle').attr('fill', '#f39c12').attr('font-size', '10px').attr('font-weight', '600')
+        .attr('text-anchor', 'middle').attr('fill', '#f39c12').attr('font-size', '12px').attr('font-weight', '600')
         .text('mask + softmax');
     sectionG.append('line')
         .attr('x1', midX).attr('y1', sramY1 + sH).attr('x2', midX).attr('y2', softY)
@@ -1268,7 +1263,7 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
     }
 
     // O_i accumulator(s)
-    const oY = pY + sH + 14;
+    const oY = pY + sH + 20;
     const oX = midX - oW / 2;
     if (packed) {
         for (let hi = numShown - 1; hi >= 0; hi--) {
@@ -1278,12 +1273,12 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
                 hi === 0 ? `O_i^(h0)` : '', hi === 0 ? `[${actBr}, ${d_v}]` : null, hi === 0 ? 0.7 : 0.25);
         }
         sectionG.append('text').attr('x', midX).attr('y', oY + oH + 14)
-            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '9px')
+            .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '11px')
             .text(`${G} accumulators (registers)`);
     } else {
         drawTileBlock(sectionG, oX, oY, oW, oH, '#3498db', `O_i`, `[${actBr}, ${d_v}]`);
         sectionG.append('text').attr('x', midX).attr('y', oY + oH + 14)
-            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
+            .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '11px')
             .text('Accumulator (registers)');
     }
 
@@ -1294,28 +1289,28 @@ function drawTileComputation(g, x, y, width, params, Q, K, V, O,
 
     // O += P_ij @ V_j label
     sectionG.append('text').attr('x', midX + Math.max(sW, oW) / 2 + totalStackH + 15).attr('y', pY + sH + 10)
-        .attr('fill', '#3498db').attr('font-size', '9px')
+        .attr('fill', '#3498db').attr('font-size', '11px')
         .text(packed ? 'O_i^(h) += P_ij^(h) \u00d7 V_j' : 'O_i += P_ij \u00d7 V_j');
 
     // Write-back arrow
-    const wbY = oY + oH + 24;
+    const wbY = oY + oH + 30;
     let wbText = params.splitKV ? 'Write partial O_i \u2192 HBM' : 'Write O_i \u2192 HBM (final iter)';
     if (packed) wbText = params.splitKV ? `Write ${G}\u00d7 partial O_i \u2192 HBM` : `Write ${G}\u00d7 O_i \u2192 HBM (final iter)`;
     sectionG.append('text').attr('x', midX).attr('y', wbY + 4)
-        .attr('text-anchor', 'middle').attr('fill', '#3498db').attr('font-size', '9px').attr('font-weight', '600')
+        .attr('text-anchor', 'middle').attr('fill', '#3498db').attr('font-size', '11px').attr('font-weight', '600')
         .text(wbText);
 
     // Online softmax state
     const stateX = midX + Math.max(sW, oW) / 2 + totalStackH + 20;
     const stateY = oY;
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 10)
-        .attr('fill', '#666').attr('font-size', '9px').attr('font-style', 'italic')
+        .attr('fill', '#666').attr('font-size', '11px').attr('font-style', 'italic')
         .text('Online softmax state:');
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 22)
-        .attr('fill', '#888').attr('font-size', '9px')
+        .attr('fill', '#888').attr('font-size', '11px')
         .text(packed ? `m_i [${G}\u00d7${actBr}] — row max` : `m_i [${actBr}] — row max`);
     sectionG.append('text').attr('x', stateX).attr('y', stateY + 34)
-        .attr('fill', '#888').attr('font-size', '9px')
+        .attr('fill', '#888').attr('font-size', '11px')
         .text(packed ? `l_i [${G}\u00d7${actBr}] — row sum(exp)` : `l_i [${actBr}] — row sum(exp)`);
 
     return y + wbY + 16;
@@ -1337,7 +1332,7 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
         .text('Memory Hierarchy');
 
     const topY = 26;
-    const bandH = 44;
+    const bandH = 76;
     const bandGap = 28;
     const bandW = width;
 
@@ -1410,7 +1405,7 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
         // Tier label
         sectionG.append('text')
             .attr('x', 6).attr('y', bY + 13)
-            .attr('fill', '#888').attr('font-size', '9px').attr('font-weight', '600')
+            .attr('fill', '#888').attr('font-size', '11px').attr('font-weight', '600')
             .text(tier.label);
 
         // Items
@@ -1418,30 +1413,40 @@ function drawMemoryHierarchy(g, x, y, width, params, Q, K, V, O,
         const itemGap = bandW / (tier.items.length + 1);
         tier.items.forEach((item, ii) => {
             const ix = itemGap * (ii + 1);
-            sectionG.append('text').attr('x', ix).attr('y', itemY + 8)
-                .attr('text-anchor', 'middle').attr('fill', item.color).attr('font-size', '10px').attr('font-weight', '600')
+            let ly = itemY + 8;
+            sectionG.append('text').attr('x', ix).attr('y', ly)
+                .attr('text-anchor', 'middle').attr('fill', item.color).attr('font-size', '12px').attr('font-weight', '600')
                 .text(item.label);
-            const sizeStr = `[${item.shape}] ${fmtBytes(item.bytes)}`;
-            sectionG.append('text').attr('x', ix).attr('y', itemY + 20)
-                .attr('text-anchor', 'middle').attr('fill', '#666').attr('font-size', '9px')
-                .text(item.note ? `${sizeStr} (${item.note})` : sizeStr);
+            ly += 14;
+            sectionG.append('text').attr('x', ix).attr('y', ly)
+                .attr('text-anchor', 'middle').attr('fill', '#666').attr('font-size', '11px')
+                .text(`[${item.shape}]`);
+            ly += 12;
+            sectionG.append('text').attr('x', ix).attr('y', ly)
+                .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '11px')
+                .text(fmtBytes(item.bytes));
+            if (item.note) {
+                ly += 12;
+                sectionG.append('text').attr('x', ix).attr('y', ly)
+                    .attr('text-anchor', 'middle').attr('fill', '#666').attr('font-size', '10px')
+                    .text(`(${item.note})`);
+            }
         });
 
         // Arrow between tiers
         if (ti < tiers.length - 1) {
             const arrowY = bY + bandH + 4;
             sectionG.append('text')
-                .attr('x', bandW / 2).attr('y', arrowY + 12)
-                .attr('text-anchor', 'middle').attr('fill', '#555').attr('font-size', '9px')
-                .text(arrowLabels[ti]);
-            // Down arrow
-            sectionG.append('text')
-                .attr('x', bandW / 2 - 80).attr('y', arrowY + 12)
-                .attr('text-anchor', 'middle').attr('fill', '#555').attr('font-size', '12px')
+                .attr('x', 12).attr('y', arrowY + 14)
+                .attr('fill', '#666').attr('font-size', '18px').attr('font-weight', '700')
                 .text('\u2195');
             sectionG.append('text')
-                .attr('x', bandW / 2 + 80).attr('y', arrowY + 12)
-                .attr('text-anchor', 'middle').attr('fill', '#555').attr('font-size', '12px')
+                .attr('x', bandW / 2).attr('y', arrowY + 12)
+                .attr('text-anchor', 'middle').attr('fill', '#555').attr('font-size', '11px')
+                .text(arrowLabels[ti]);
+            sectionG.append('text')
+                .attr('x', bandW - 12).attr('y', arrowY + 14)
+                .attr('text-anchor', 'end').attr('fill', '#666').attr('font-size', '18px').attr('font-weight', '700')
                 .text('\u2195');
         }
     });
@@ -1498,7 +1503,7 @@ function drawSplitKVReduction(g, x, y, width, params, S_q, numKVBlocks, selQ, O,
     // Explanation
     sectionG.append('text')
         .attr('x', 0).attr('y', topY + blockH + 18)
-        .attr('fill', '#888').attr('font-size', '9px')
+        .attr('fill', '#888').attr('font-size', '11px')
         .text('Partial outputs combined via online softmax correction: rescale by max(m) and sum(l) across splits');
 
     return y + topY + blockH + 28;
@@ -1529,13 +1534,13 @@ function drawTileBlock(g, x, y, w, h, color, label, shapeStr, opacity) {
     g.append('text')
         .attr('x', x + w / 2).attr('y', y + h / 2 + (shapeStr ? -1 : 3))
         .attr('text-anchor', 'middle')
-        .attr('fill', '#fff').attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', '#fff').attr('font-size', '12px').attr('font-weight', '600')
         .text(label);
     if (shapeStr) {
         g.append('text')
             .attr('x', x + w / 2).attr('y', y + h / 2 + 11)
             .attr('text-anchor', 'middle')
-            .attr('fill', '#ddd').attr('font-size', '8px')
+            .attr('fill', '#ddd').attr('font-size', '12px')
             .text(shapeStr);
     }
 }

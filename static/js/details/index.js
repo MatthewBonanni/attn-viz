@@ -120,10 +120,10 @@ function _renderOpDetail(op, graph, params) {
             break;
         case 'broadcast':
         case 'reshape':
-            drawBroadcastDetail(svg, op, tensorMap);
+            drawBroadcastDetail(svg, op, tensorMap, params);
             break;
         case 'rope':
-            drawRopeDetail(svg, op, tensorMap);
+            drawRopeDetail(svg, op, tensorMap, params);
             break;
         default:
             drawGenericDetail(svg, op, tensorMap);
@@ -141,7 +141,7 @@ export function showTensorDetail(tensor, params) {
 
 function _renderTensorDetail(tensor, params) {
     const panel = d3.select('#detail-panel');
-    panel.classed('visible', true).classed('flash-wide', false);
+    panel.classed('visible', true).classed('flash-wide', false).classed('broadcast-wide', false);
     d3.select('#detail-body .flash-controls').remove();
     _shiftStatsOverlay(true);
     d3.select('#detail-title').text(tensor.label);
@@ -186,7 +186,7 @@ export function showGroupDetail(group) {
 
 function _renderGroupDetail(group) {
     const panel = d3.select('#detail-panel');
-    panel.classed('visible', true).classed('flash-wide', false);
+    panel.classed('visible', true).classed('flash-wide', false).classed('broadcast-wide', false);
     d3.select('#detail-body .flash-controls').remove();
     _shiftStatsOverlay(true);
     d3.select('#detail-title').text(group.label);

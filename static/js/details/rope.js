@@ -1,7 +1,7 @@
 // rope.js — RoPE detail visualization
-import { detailMetrics, drawDetailBlock3D } from './shared.js';
+import { detailMetrics, drawDetailBlock3D, TP_COLORS, RANK_COLORS } from './shared.js';
 
-export function drawRopeDetail(svg, op, tensorMap) {
+export function drawRopeDetail(svg, op, tensorMap, params) {
     const { w: svgW, cx: svgCx } = detailMetrics();
     const input = tensorMap[op.inputs[0]];
     const output = tensorMap[op.output];
@@ -33,8 +33,101 @@ export function drawRopeDetail(svg, op, tensorMap) {
     const tensorBlockX = mid - bw / 2;
     const tensorBlockY = 20 + bd * 0.4;
 
+    const tpSize = (params && params.tp_size) || 1;
+    const dpSize = (params && params.dp_size) || 1;
+    const isTp = input.tpSharded && tpSize > 1;
+    const isDp = input.dpSharded && dpSize > 1;
+    const SHARDED_NEUTRAL = '#f39c12';
+    const NEUTRALIZE_COLORS = new Set(['#e74c3c', '#2ecc71', '#f39c12', '#e67e22']);
+    const blockColor = (isTp || isDp) && NEUTRALIZE_COLORS.has(input.color) ? SHARDED_NEUTRAL : input.color;
+
     const ropeGrp = inShape.length === 4 ? { outer: inShape[0], inner: inShape[1] } : null;
-    drawDetailBlock3D(g, tensorBlockX, tensorBlockY, bw, bh, bd, input.color, input.label, ropeGrp);
+    const tpInfo = isTp ? { tpSize } : null;
+    const dpInfo = isDp ? { dpSize, dpFracs: input.dpBoundaryFracs } : null;
+    const dpFracs = (input.dpBoundaryFracs) || Array.from({length: dpSize + 1}, (_, i) => i / dpSize);
+    const B = (params && params.B) || 1;
+    const d_h_param = params && params.d_h;
+    const n_h = params && params.n_h;
+    const n_kv = params && params.n_kv;
+
+    let tooltipG = null;
+    let baseSvgH = 0;
+    function formatDimRange(dimName, start, end) {
+        if (d_h_param && d_h_param > 1) {
+            if (dimName === 'D' && n_h)
+                return `n_h[${Math.floor(start / d_h_param)}\u2013${Math.floor(end / d_h_param)}] (${dimName}[${start}\u2013${end}])`;
+            if (dimName.includes('\u00b7d_h') && n_kv)
+                return `n_kv[${Math.floor(start / d_h_param)}\u2013${Math.floor(end / d_h_param)}] (${dimName}[${start}\u2013${end}])`;
+        }
+        return `${dimName}[${start}\u2013${end}]`;
+    }
+
+    function showTooltip(info) {
+        if (tooltipG) tooltipG.remove();
+        if (!info) { tooltipG = null; if (baseSvgH) svg.attr('height', baseSvgH); return; }
+        tooltipG = g.append('g');
+
+        const shape = inShape;
+        const dimNames = inNames;
+        const parts = [];
+        const rankIdx = (info.dp || 0) * Math.max(1, tpSize) + (info.tp || 0);
+        const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
+
+        if (isDp && info.dp != null) {
+            parts.push(`DP Rank ${info.dp}`);
+            if (B > 1) {
+                const reqs = [];
+                for (let r = 0; r < B; r++) {
+                    if (Math.floor(r * dpSize / B) === info.dp) reqs.push(r);
+                }
+                parts.push(`Req ${reqs.join(', ')}`);
+            }
+            const rowDim = shape.length >= 3 ? (dimNames[dimNames.length - 2] || 'rows') : (dimNames[0] || 'rows');
+            const rowSize = shape.length >= 3 ? shape[shape.length - 2] : shape[0];
+            const dpStart = Math.round(dpFracs[info.dp] * rowSize);
+            const dpEnd = Math.round(dpFracs[info.dp + 1] * rowSize) - 1;
+            parts.push(formatDimRange(rowDim, dpStart, dpEnd));
+        }
+        if (isTp && info.tp != null) {
+            parts.push(`TP Rank ${info.tp}`);
+            const tpDim = input.tpDim;
+            if (tpDim != null) {
+                const dimLabel = dimNames[tpDim] || `dim${tpDim}`;
+                const perRank = Math.round(shape[tpDim] / tpSize);
+                parts.push(formatDimRange(dimLabel, info.tp * perRank, (info.tp + 1) * perRank - 1));
+            }
+        }
+        if (isTp && isDp) {
+            parts.unshift(`Rank ${rankIdx}`);
+        }
+
+        const padX = 10, padY = 8, lineH = 16;
+        const boxW = 220, boxH = padY * 2 + parts.length * lineH;
+        const ttX = mid - boxW / 2;
+        const ttY = baseSvgH - 20;
+
+        tooltipG.append('rect')
+            .attr('x', ttX).attr('y', ttY)
+            .attr('width', boxW).attr('height', boxH)
+            .attr('rx', 6)
+            .attr('fill', '#12141f').attr('fill-opacity', 0.95)
+            .attr('stroke', cellColor).attr('stroke-width', 1.5).attr('stroke-opacity', 0.7);
+        parts.forEach((text, i) => {
+            tooltipG.append('text')
+                .attr('x', ttX + padX).attr('y', ttY + padY + (i + 1) * lineH - 3)
+                .attr('fill', i === 0 ? cellColor : '#bbb')
+                .attr('font-size', '11px').attr('font-weight', i === 0 ? '600' : '400')
+                .text(text);
+        });
+
+        const tooltipBottom = ttY + boxH + 40;
+        if (tooltipBottom > baseSvgH) svg.attr('height', tooltipBottom);
+    }
+
+    const hasParallelism = isTp || isDp;
+    const onCellHover = hasParallelism ? (info) => showTooltip(info) : null;
+
+    drawDetailBlock3D(g, tensorBlockX, tensorBlockY, bw, bh, bd, blockColor, input.label, ropeGrp, tpInfo, dpInfo, onCellHover, input.color);
 
     // Dim labels on the tensor
     g.append('text').attr('class', 'dim-label')
@@ -353,4 +446,5 @@ export function drawRopeDetail(svg, op, tensorMap) {
     y += 20;
 
     svg.attr('height', y + 10);
+    baseSvgH = y + 10;
 }

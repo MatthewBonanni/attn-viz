@@ -40,6 +40,12 @@ export function drawPagedCacheDetail(svg, tensor, params) {
 
         // --- Request selector (top, prominent, wrapping) ---
         if (B > 1) {
+            g.append('text')
+                .attr('x', availW / 2).attr('y', y)
+                .attr('text-anchor', 'middle')
+                .attr('fill', '#666').attr('font-size', '10px').attr('font-style', 'italic')
+                .text('Select a request to view its cache layout');
+            y += 14;
             const btnW = 56;
             const btnH = 22;
             const btnGap = 6;
@@ -80,7 +86,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 btn.append('text')
                     .attr('x', bx + btnW / 2).attr('y', by + 17)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', isSelected ? '#ddd' : '#666').attr('font-size', '7px')
+                    .attr('fill', isSelected ? '#ddd' : '#666').attr('font-size', '9px')
                     .text(rType);
             }
             y += numRows * (btnH + btnGap) + 4;
@@ -191,7 +197,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         g.append('text')
             .attr('x', srcX - 4).attr('y', srcDrawY + srcH / 2 + 3)
             .attr('text-anchor', 'end')
-            .attr('fill', '#aaa').attr('font-size', '8px')
+            .attr('fill', '#aaa').attr('font-size', '10px')
             .text(`S_q=${sq}`);
 
         // Arrow from source to blocks
@@ -199,7 +205,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
         const arrowMidY = y + sectionH / 2;
         g.append('text')
             .attr('x', arrowX).attr('y', arrowMidY - 4)
-            .attr('fill', '#888').attr('font-size', '8px')
+            .attr('fill', '#888').attr('font-size', '10px')
             .text('slice by');
         g.append('text')
             .attr('x', arrowX).attr('y', arrowMidY + 6)
@@ -263,13 +269,13 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 g.append('text')
                     .attr('x', existBlockX + blockDrawW / 2).attr('y', existBlockY + blockDrawH / 2 + 3)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', '#ddd').attr('font-size', '8px')
+                    .attr('fill', '#ddd').attr('font-size', '10px')
                     .text(tokensFillingExisting > 0 ? `+${tokensFillingExisting}` : 'full');
             }
             g.append('text')
                 .attr('x', existBlockX + blockDrawW / 2).attr('y', existBlockY - 4)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#f8e45c').attr('font-size', '8px')
+                .attr('fill', '#f8e45c').attr('font-size', '10px')
                 .text('existing block');
         }
 
@@ -310,7 +316,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 g.append('text')
                     .attr('x', bx + blockDrawW / 2).attr('y', by + blockDrawH / 2 + 3)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', '#ddd').attr('font-size', '8px')
+                    .attr('fill', '#ddd').attr('font-size', '10px')
                     .text(`${tokensInBlock}/${bs}`);
             }
         }
@@ -320,13 +326,13 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             g.append('text')
                 .attr('x', blocksX + blocksAreaW / 2).attr('y', blocksStartY - 6)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#888').attr('font-size', '8px')
+                .attr('fill', '#888').attr('font-size', '10px')
                 .text(`${nNewBlocks} new block${nNewBlocks !== 1 ? 's' : ''}`);
         } else if (tokensFillingExisting > 0) {
             g.append('text')
                 .attr('x', blocksX + blocksAreaW / 2).attr('y', blocksStartY - 6)
                 .attr('text-anchor', 'middle')
-                .attr('fill', '#888').attr('font-size', '8px')
+                .attr('fill', '#888').attr('font-size', '10px')
                 .text('no new blocks needed');
         }
 
@@ -348,8 +354,8 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             .text(`Block table — Req ${si} (${nBlocks} blocks)`);
         y += 16;
 
-        const blockW = Math.min(44, Math.max(24, (availW - 20) / Math.max(nBlocks, 1)));
-        const blockH = 36;
+        const blockW = Math.min(54, Math.max(30, (availW - 20) / Math.max(nBlocks, 1)));
+        const blockH = 40;
         const blocksPerRow = Math.floor(availW / (blockW + 3)) || 1;
         const blockTableW = Math.min(nBlocks, blocksPerRow) * (blockW + 3) - 3;
         const blockTableOffX = (availW - blockTableW) / 2;
@@ -403,12 +409,12 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 g.append('text')
                     .attr('x', bx + blockW / 2).attr('y', by + blockH / 2)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', '#ddd').attr('font-size', '8px')
+                    .attr('fill', '#ddd').attr('font-size', '10px')
                     .text(`${tokensInBlock}/${bs}`);
                 g.append('text')
                     .attr('x', bx + blockW / 2).attr('y', by + blockH / 2 + 10)
                     .attr('text-anchor', 'middle')
-                    .attr('fill', '#888').attr('font-size', '7px')
+                    .attr('fill', '#888').attr('font-size', '9px')
                     .text(`blk ${bi}`);
             }
         }
@@ -505,7 +511,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                     g.append('text')
                         .attr('x', bx + physBlockW / 2).attr('y', by + physBlockH / 2 + 3)
                         .attr('text-anchor', 'middle')
-                        .attr('fill', '#ddd').attr('font-size', '7px')
+                        .attr('fill', '#ddd').attr('font-size', '9px')
                         .text(`R${pb.seq}`);
                 }
             }

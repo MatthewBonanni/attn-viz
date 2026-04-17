@@ -1,5 +1,5 @@
 // matmul.js — Matmul (L-shaped diagram) and All-Reduce detail visualizations
-import { detailMetrics, drawDetailBlock, drawDetailBlock3D, TP_COLORS, RANK_COLORS } from './shared.js';
+import { detailMetrics, drawDetailBlock, drawDetailBlock3D, TP_COLORS, RANK_COLORS, SHARD_BASE, SHARD_OPACITY, SHARD_HIGHLIGHT_OPACITY } from './shared.js';
 
 export function drawMatmulDetail(svg, op, tensorMap, params) {
     const { w: svgW } = detailMetrics();
@@ -69,34 +69,45 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
     }
 
     // --- Draw base blocks ---
+    const SHARDED_NEUTRAL = '#f39c12';
+    const NEUTRALIZE_COLORS = new Set(['#e74c3c', '#2ecc71', '#f39c12', '#e67e22']);
+    const colorFor = (t) => {
+        const s = (t.tpSharded && tpSize > 1) || (t.dpSharded && dpSize > 1);
+        return (s && t.type !== 'weight' && t.type !== 'mask' && NEUTRALIZE_COLORS.has(t.color)) ? SHARDED_NEUTRAL : t.color;
+    };
 
     // Matrix A (left of result)
-    drawDetailBlock(g, originX - wA - pad, originY, wA, hA, A.color, A.label);
+    const aX = originX - wA - pad;
+    const aSharded = (A.tpSharded && tpSize > 1) || (A.dpSharded && dpSize > 1);
+    drawDetailBlock(g, aX, originY, wA, hA, colorFor(A), A.label, aSharded && A.type !== 'weight' && A.type !== 'mask');
     g.append('text').attr('class', 'dim-label')
-        .attr('x', originX - wA - pad + wA / 2).attr('y', originY + hA + 14)
+        .attr('x', aX + wA / 2).attr('y', originY + hA + 14)
         .attr('text-anchor', 'middle').text(A.dimNames ? A.dimNames[A.dimNames.length - 1] + '=' + inner : inner);
     g.append('text').attr('class', 'dim-label')
-        .attr('x', originX - wA - pad - 8).attr('y', originY + hA / 2 + 3)
+        .attr('x', aX - 8).attr('y', originY + hA / 2 + 3)
         .attr('text-anchor', 'end').text(A.dimNames ? A.dimNames[A.dimNames.length - 2] + '=' + rows_a : rows_a);
 
     // Matrix B (above result)
+    const bX = originX, bY_pos = originY - hB - pad;
     if (B_tensor) {
         const shB = B_tensor.shape;
-        drawDetailBlock(g, originX, originY - hB - pad, wC, hB, B_tensor.color, B_tensor.label);
+        const bSharded = (B_tensor.tpSharded && tpSize > 1) || (B_tensor.dpSharded && dpSize > 1);
+        drawDetailBlock(g, bX, bY_pos, wC, hB, colorFor(B_tensor), B_tensor.label, bSharded && B_tensor.type !== 'weight' && B_tensor.type !== 'mask');
         const bDimNames = B_tensor.dimNames || [];
         const bColName = bTransposed ? bDimNames[bDimNames.length - 2] || '' : bDimNames[bDimNames.length - 1] || '';
         const bRowName = bTransposed ? bDimNames[bDimNames.length - 1] || '' : bDimNames[bDimNames.length - 2] || '';
         const bRowVal = bTransposed ? shB[shB.length - 1] : shB[shB.length - 2];
         g.append('text').attr('class', 'dim-label')
-            .attr('x', originX + wC / 2).attr('y', originY - hB - pad - 6)
+            .attr('x', bX + wC / 2).attr('y', bY_pos - 6)
             .attr('text-anchor', 'middle').text(bColName ? bColName + '=' + cols_b : cols_b);
         g.append('text').attr('class', 'dim-label')
-            .attr('x', originX - 8).attr('y', originY - hB - pad + hB / 2 + 3)
+            .attr('x', bX - 8).attr('y', bY_pos + hB / 2 + 3)
             .attr('text-anchor', 'end').text(bRowName ? bRowName + '=' + bRowVal : inner);
     }
 
     // Result C (center)
-    drawDetailBlock(g, originX, originY, wC, hC, C.color, C.label);
+    const cSharded = (C.tpSharded && tpSize > 1) || (C.dpSharded && dpSize > 1);
+    drawDetailBlock(g, originX, originY, wC, hC, colorFor(C), C.label, cSharded && C.type !== 'weight' && C.type !== 'mask');
     const resultColName = B_tensor && B_tensor.dimNames
         ? (bTransposed ? B_tensor.dimNames[B_tensor.dimNames.length - 2] : B_tensor.dimNames[B_tensor.dimNames.length - 1])
         : (C.dimNames ? C.dimNames[C.dimNames.length - 1] : '');
@@ -104,306 +115,304 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
         .attr('x', originX + wC / 2).attr('y', originY + hC + 14)
         .attr('text-anchor', 'middle').text(resultColName ? resultColName + '=' + cols_b : cols_b);
 
-    // --- TP stripes on 2D weight (B_tensor) ---
-    if (B_tensor && B_tensor.tpSharded && B_tensor.tpSize > 1 && B_tensor.tpDim != null) {
-        const bTpSize = B_tensor.tpSize;
-        const bTpDim = B_tensor.tpDim;
-        const bX = originX, bY = originY - hB - pad;
-        // tpDim=1 means column-parallel: shard cols (visual width after transpose consideration)
-        // tpDim=0 means row-parallel: shard rows
-        // In the matmul diagram, B is displayed as [inner × cols_b] (possibly transposed)
-        // tpDim refers to the original tensor dimension
-        const shardVisualCols = bTransposed ? (bTpDim === 0) : (bTpDim === 1);
-
-        for (let tp = 0; tp < bTpSize; tp++) {
-            const tpColor = TP_COLORS[tp % TP_COLORS.length];
-            if (shardVisualCols) {
-                const sx = bX + (tp / bTpSize) * wC;
-                const sw = wC / bTpSize;
-                g.append('rect')
-                    .attr('x', sx).attr('y', bY).attr('width', sw).attr('height', hB)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            } else {
-                const sy = bY + (tp / bTpSize) * hB;
-                const sh = hB / bTpSize;
-                g.append('rect')
-                    .attr('x', bX).attr('y', sy).attr('width', wC).attr('height', sh)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            }
+    // --- Tooltip system ---
+    let tooltipG = null;
+    let baseSvgH = 0;
+    function formatDimRange(dimName, start, end) {
+        const d_h = params && params.d_h;
+        const n_h = params && params.n_h;
+        const n_kv = params && params.n_kv;
+        if (d_h && d_h > 1) {
+            if (dimName === 'D' && n_h)
+                return `n_h[${Math.floor(start / d_h)}\u2013${Math.floor(end / d_h)}] (${dimName}[${start}\u2013${end}])`;
+            if (dimName.includes('\u00b7d_h') && n_kv)
+                return `n_kv[${Math.floor(start / d_h)}\u2013${Math.floor(end / d_h)}] (${dimName}[${start}\u2013${end}])`;
         }
-        for (let tp = 1; tp < bTpSize; tp++) {
-            if (shardVisualCols) {
-                const lx = bX + (tp / bTpSize) * wC;
-                g.append('line')
-                    .attr('x1', lx).attr('y1', bY).attr('x2', lx).attr('y2', bY + hB)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            } else {
-                const ly = bY + (tp / bTpSize) * hB;
-                g.append('line')
-                    .attr('x1', bX).attr('y1', ly).attr('x2', bX + wC).attr('y2', ly)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            }
-        }
+        return `${dimName}[${start}\u2013${end}]`;
     }
 
-    // --- TP stripes on 2D activation A (e.g. ctx before row-parallel W_O) ---
-    if (A.tpSharded && A.tpSize > 1 && A.tpDim != null && A.type !== 'weight') {
-        const aTpSize = A.tpSize;
-        const aX = originX - wA - pad, aY = originY;
-        // tpDim=1 means last dim sharded → visual width for A
-        for (let tp = 0; tp < aTpSize; tp++) {
-            const tpColor = TP_COLORS[tp % TP_COLORS.length];
-            if (A.tpDim === 1) {
-                const sx = aX + (tp / aTpSize) * wA;
-                const sw = wA / aTpSize;
-                g.append('rect')
-                    .attr('x', sx).attr('y', aY).attr('width', sw).attr('height', hA)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            } else {
-                const sy = aY + (tp / aTpSize) * hA;
-                const sh = hA / aTpSize;
-                g.append('rect')
-                    .attr('x', aX).attr('y', sy).attr('width', wA).attr('height', sh)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            }
-        }
-        for (let tp = 1; tp < aTpSize; tp++) {
-            if (A.tpDim === 1) {
-                const lx = aX + (tp / aTpSize) * wA;
-                g.append('line')
-                    .attr('x1', lx).attr('y1', aY).attr('x2', lx).attr('y2', aY + hA)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            } else {
-                const ly = aY + (tp / aTpSize) * hA;
-                g.append('line')
-                    .attr('x1', aX).attr('y1', ly).attr('x2', aX + wA).attr('y2', ly)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            }
-        }
-    }
+    function showTooltip(info, tensor, tx, ty) {
+        if (tooltipG) tooltipG.remove();
+        if (!info) { tooltipG = null; if (baseSvgH) svg.attr('height', baseSvgH); return; }
+        tooltipG = g.append('g');
 
-    // --- TP stripes on 2D result C (e.g. Q_flat output of column-parallel) ---
-    if (C.tpSharded && C.tpSize > 1 && C.tpDim != null && C.shape.length === 2) {
-        const cTpSize = C.tpSize;
-        for (let tp = 0; tp < cTpSize; tp++) {
-            const tpColor = TP_COLORS[tp % TP_COLORS.length];
-            if (C.tpDim === 1) {
-                const sx = originX + (tp / cTpSize) * wC;
-                const sw = wC / cTpSize;
-                g.append('rect')
-                    .attr('x', sx).attr('y', originY).attr('width', sw).attr('height', hC)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            } else {
-                const sy = originY + (tp / cTpSize) * hC;
-                const sh = hC / cTpSize;
-                g.append('rect')
-                    .attr('x', originX).attr('y', sy).attr('width', wC).attr('height', sh)
-                    .attr('fill', tpColor).attr('fill-opacity', 0.3).attr('stroke', 'none');
-            }
-        }
-        for (let tp = 1; tp < cTpSize; tp++) {
-            if (C.tpDim === 1) {
-                const lx = originX + (tp / cTpSize) * wC;
-                g.append('line')
-                    .attr('x1', lx).attr('y1', originY).attr('x2', lx).attr('y2', originY + hC)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            } else {
-                const ly = originY + (tp / cTpSize) * hC;
-                g.append('line')
-                    .attr('x1', originX).attr('y1', ly).attr('x2', originX + wC).attr('y2', ly)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-            }
-        }
-    }
-
-    // --- DP overlays on A, B, C ---
-    let cellInfoG = null;
-    let cellInfoY = 0;
-
-    function showCellInfo(dp, isSkipped) {
-        if (cellInfoG) cellInfoG.remove();
-        cellInfoG = g.append('g');
-        if (isSkipped) {
-            cellInfoG.append('text').attr('class', 'dim-label')
-                .attr('x', svgW / 2).attr('y', cellInfoY)
-                .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '11px')
-                .text('Skipped \u2014 sequences don\'t attend across DP boundaries');
-            return;
-        }
-        const cellColor = RANK_COLORS[dp % RANK_COLORS.length];
-        cellInfoG.append('circle')
-            .attr('cx', svgW / 2 - 120).attr('cy', cellInfoY - 3)
-            .attr('r', 6).attr('fill', cellColor).attr('fill-opacity', 0.8);
+        const shape = tensor.shape;
+        const dimNames = tensor.dimNames || [];
+        const isTp = tensor.tpSharded && tpSize > 1;
+        const isDp = tensor.dpSharded && dpSize > 1;
+        const dpFracs = (tensor.dpBoundaryFracs) || uniformFracs(dpSize);
         const parts = [];
-        if (B_count > 1) {
-            const reqs = [];
-            for (let r = 0; r < B_count; r++) {
-                if (Math.floor(r * dpSize / B_count) === dp) reqs.push(r);
+        const rankIdx = (info.dp || 0) * Math.max(1, tpSize) + (info.tp || 0);
+        const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
+
+        if (info.dp != null) {
+            parts.push(`DP Rank ${info.dp}`);
+            if (B_count > 1) {
+                const reqs = [];
+                for (let r = 0; r < B_count; r++) {
+                    if (Math.floor(r * dpSize / B_count) === info.dp) reqs.push(r);
+                }
+                parts.push(`Req ${reqs.join(', ')}`);
             }
-            parts.push(`Req ${reqs.join(', ')}`);
+            if (isDp) {
+                const rowDim = dimNames[dimNames.length - 2] || 'rows';
+                const rowSize = shape[shape.length - 2];
+                const dpStart = Math.round(dpFracs[info.dp] * rowSize);
+                const dpEnd = Math.round(dpFracs[info.dp + 1] * rowSize) - 1;
+                parts.push(formatDimRange(rowDim, dpStart, dpEnd));
+            }
         }
-        parts.push(`DP Rank ${dp}`);
-        cellInfoG.append('text').attr('class', 'dim-label')
-            .attr('x', svgW / 2 - 108).attr('y', cellInfoY)
-            .attr('text-anchor', 'start').attr('fill', cellColor).attr('font-size', '11px')
-            .attr('font-weight', '600')
-            .text(parts.join('  \u00b7  '));
+        if (isTp && info.tp != null) {
+            parts.push(`TP Rank ${info.tp}`);
+            const tpDim = tensor.tpDim;
+            const dimLabel = tpDim === 0 ? (dimNames[0] || 'rows') : (dimNames[1] || 'cols');
+            const perRank = Math.round(shape[tpDim] / tpSize);
+            parts.push(formatDimRange(dimLabel, info.tp * perRank, (info.tp + 1) * perRank - 1));
+        }
+        if (isTp && isDp) parts.unshift(`Rank ${rankIdx}`);
+        if (info.skipped) {
+            parts.push('Not computed \u2014 sequences don\u2019t');
+            parts.push('attend across DP boundaries');
+        }
+
+        const padX = 10, padY = 8, lineH = 16;
+        const boxW = info.skipped ? 260 : 220, boxH = padY * 2 + parts.length * lineH;
+        const ttX = svgW / 2 - boxW / 2;
+        const ttY = baseSvgH - 5;
+        tooltipG.append('rect')
+            .attr('x', ttX).attr('y', ttY)
+            .attr('width', boxW).attr('height', boxH)
+            .attr('rx', 6)
+            .attr('fill', '#12141f').attr('fill-opacity', 0.95)
+            .attr('stroke', cellColor).attr('stroke-width', 1.5).attr('stroke-opacity', 0.7);
+        parts.forEach((text, i) => {
+            tooltipG.append('text')
+                .attr('x', ttX + padX).attr('y', ttY + padY + (i + 1) * lineH - 3)
+                .attr('fill', i === 0 ? cellColor : '#bbb')
+                .attr('font-size', '11px').attr('font-weight', i === 0 ? '600' : '400')
+                .text(text);
+        });
+
+        const tooltipBottom = ttY + boxH + 40;
+        if (tooltipBottom > baseSvgH) svg.attr('height', tooltipBottom);
     }
 
-    if (hasDp) {
-        // DP stripes on A (rows)
-        if (aRowIsDp) {
-            for (let dp = 0; dp < dpSize; dp++) {
-                const rankColor = RANK_COLORS[dp % RANK_COLORS.length];
-                const bandY = originY + rowFracs[dp] * hA;
-                const bandH = (rowFracs[dp + 1] - rowFracs[dp]) * hA;
-                g.append('rect')
-                    .attr('x', originX - wA - pad).attr('y', bandY)
-                    .attr('width', wA).attr('height', bandH)
-                    .attr('fill', rankColor).attr('fill-opacity', 0.25)
-                    .attr('stroke', 'none');
-            }
-            for (let dp = 1; dp < dpSize; dp++) {
-                const ly = originY + rowFracs[dp] * hA;
-                g.append('line')
-                    .attr('x1', originX - wA - pad).attr('y1', ly)
-                    .attr('x2', originX - pad).attr('y2', ly)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+    // --- Unified sharding overlay system ---
+    // All shard cells across A, B, C are tracked for cross-highlighting.
+    const allShardCells = [];
+
+    function highlightShardCells(matchFn) {
+        for (const c of allShardCells) {
+            const on = matchFn(c);
+            c.el.attr('fill-opacity', on ? SHARD_HIGHLIGHT_OPACITY : SHARD_OPACITY);
+            if (on) c.el.attr('stroke', '#fff').attr('stroke-width', 1.5);
+            else c.el.attr('stroke', 'none');
+        }
+    }
+
+    function clearShardHighlight() {
+        for (const c of allShardCells) {
+            c.el.attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none');
+        }
+    }
+
+    // Draw combined TP+DP grid on a 2D block
+    function drawShardGrid(tensor, bx, by, bw, bh, key, tooltipX, tooltipY) {
+        const isTp = tensor.tpSharded && tpSize > 1 && tensor.tpDim != null;
+        const isDp = tensor.dpSharded && dpSize > 1;
+        if (!isTp && !isDp) return;
+
+        // Skip TP on weights for A position, and on 3D+ C
+        if (key === 'a' && tensor.type === 'weight' && isTp) return;
+        if (key === 'c' && tensor.shape.length !== 2 && isTp) return;
+
+        const effTpSize = isTp ? tpSize : 1;
+        const effDpSize = isDp ? dpSize : 1;
+
+        // Determine TP visual direction
+        let tpVisual = null;
+        if (isTp) {
+            const tpDim = tensor.tpDim;
+            if (key === 'b') {
+                tpVisual = bTransposed ? (tpDim === 0 ? 'cols' : 'rows') : (tpDim === 1 ? 'cols' : 'rows');
+            } else {
+                tpVisual = tpDim === 1 ? 'cols' : 'rows';
             }
         }
 
-        // DP stripes on B
-        if (B_tensor && B_tensor.dpSharded && dpSize > 1) {
-            const bDimNames = B_tensor.dimNames || [];
-            const bDpIdx = bDimNames.lastIndexOf(B_tensor.dpSharded);
+        // Determine DP visual direction and fracs
+        let dpVisual = 'rows';
+        const dpFracs = (tensor.dpBoundaryFracs && tensor.dpBoundaryFracs.length === dpSize + 1)
+            ? tensor.dpBoundaryFracs : uniformFracs(dpSize);
+        if (isDp && key === 'b') {
+            const bDimNames = tensor.dimNames || [];
+            const bDpIdx = bDimNames.lastIndexOf(tensor.dpSharded);
             const bDpIsSecondLast = bDpIdx === bDimNames.length - 2;
-            const bStripesVertical = bDpIsSecondLast ? bTransposed : !bTransposed;
-            const bFracs = (B_tensor.dpBoundaryFracs && B_tensor.dpBoundaryFracs.length === dpSize + 1)
-                ? B_tensor.dpBoundaryFracs : uniformFracs(dpSize);
-
-            for (let dp = 0; dp < dpSize; dp++) {
-                const rankColor = RANK_COLORS[dp % RANK_COLORS.length];
-                if (bStripesVertical) {
-                    const bandX = originX + bFracs[dp] * wC;
-                    const bandW = (bFracs[dp + 1] - bFracs[dp]) * wC;
-                    g.append('rect')
-                        .attr('x', bandX).attr('y', originY - hB - pad)
-                        .attr('width', bandW).attr('height', hB)
-                        .attr('fill', rankColor).attr('fill-opacity', 0.25)
-                        .attr('stroke', 'none');
-                } else {
-                    const bandY = originY - hB - pad + bFracs[dp] * hB;
-                    const bandH = (bFracs[dp + 1] - bFracs[dp]) * hB;
-                    g.append('rect')
-                        .attr('x', originX).attr('y', bandY)
-                        .attr('width', wC).attr('height', bandH)
-                        .attr('fill', rankColor).attr('fill-opacity', 0.25)
-                        .attr('stroke', 'none');
-                }
-            }
-            for (let dp = 1; dp < dpSize; dp++) {
-                if (bStripesVertical) {
-                    const lx = originX + bFracs[dp] * wC;
-                    g.append('line')
-                        .attr('x1', lx).attr('y1', originY - hB - pad)
-                        .attr('x2', lx).attr('y2', originY - pad)
-                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-                } else {
-                    const ly = originY - hB - pad + bFracs[dp] * hB;
-                    g.append('line')
-                        .attr('x1', originX).attr('y1', ly)
-                        .attr('x2', originX + wC).attr('y2', ly)
-                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
-                }
-            }
+            dpVisual = (bDpIsSecondLast ? bTransposed : !bTransposed) ? 'cols' : 'rows';
         }
 
-        // DP on result C
-        if (isBlockDiag && colFracs) {
-            // Block-diagonal grid
-            for (let dr = 0; dr < dpSize; dr++) {
-                for (let dc = 0; dc < dpSize; dc++) {
-                    const cellX = originX + colFracs[dc] * wC;
-                    const cellW = (colFracs[dc + 1] - colFracs[dc]) * wC;
-                    const cellY = originY + rowFracs[dr] * hC;
-                    const cellH = (rowFracs[dr + 1] - rowFracs[dr]) * hC;
+        for (let dp = 0; dp < effDpSize; dp++) {
+            for (let tp = 0; tp < effTpSize; tp++) {
+                const rankIdx = dp * effTpSize + tp;
+                const cellColor = RANK_COLORS[rankIdx % RANK_COLORS.length];
 
-                    if (dr === dc) {
-                        const rankColor = RANK_COLORS[dr % RANK_COLORS.length];
-                        const cell = g.append('rect')
-                            .attr('x', cellX).attr('y', cellY)
-                            .attr('width', cellW).attr('height', cellH)
-                            .attr('fill', rankColor).attr('fill-opacity', 0.35)
-                            .attr('stroke', rankColor).attr('stroke-width', 1)
-                            .attr('stroke-opacity', 0.6)
-                            .style('cursor', 'pointer');
+                let sx, sy, sw, sh;
+                // Compute position based on DP and TP directions
+                const dpF0 = dpFracs[dp], dpF1 = dpFracs[dp + 1];
 
-                        cell.on('mouseenter', function() {
-                            d3.select(this).attr('fill-opacity', 0.6).attr('stroke-width', 2);
-                        });
-                        cell.on('mouseleave', function() {
-                            d3.select(this).attr('fill-opacity', 0.35).attr('stroke-width', 1);
-                        });
-                        cell.on('click', (event) => {
-                            event.stopPropagation();
-                            showCellInfo(dr, false);
-                        });
+                if (isDp && isTp) {
+                    // Both active — subdivide in both directions
+                    if (dpVisual === 'rows' && tpVisual === 'cols') {
+                        sx = bx + (tp / effTpSize) * bw; sw = bw / effTpSize;
+                        sy = by + dpF0 * bh; sh = (dpF1 - dpF0) * bh;
+                    } else if (dpVisual === 'rows' && tpVisual === 'rows') {
+                        sx = bx; sw = bw;
+                        const dpH = (dpF1 - dpF0) * bh;
+                        sy = by + dpF0 * bh + (tp / effTpSize) * dpH;
+                        sh = dpH / effTpSize;
+                    } else if (dpVisual === 'cols' && tpVisual === 'cols') {
+                        sy = by; sh = bh;
+                        const dpW = (dpF1 - dpF0) * bw;
+                        sx = bx + dpF0 * bw + (tp / effTpSize) * dpW;
+                        sw = dpW / effTpSize;
                     } else {
-                        const cell = g.append('rect')
-                            .attr('x', cellX).attr('y', cellY)
-                            .attr('width', cellW).attr('height', cellH)
-                            .attr('fill', '#000').attr('fill-opacity', 0.35)
-                            .attr('stroke', '#333').attr('stroke-width', 0.5)
-                            .style('cursor', 'pointer');
-
-                        g.append('line')
-                            .attr('x1', cellX + 2).attr('y1', cellY + 2)
-                            .attr('x2', cellX + cellW - 2).attr('y2', cellY + cellH - 2)
-                            .attr('stroke', '#444').attr('stroke-width', 0.75)
-                            .attr('pointer-events', 'none');
-                        g.append('line')
-                            .attr('x1', cellX + cellW - 2).attr('y1', cellY + 2)
-                            .attr('x2', cellX + 2).attr('y2', cellY + cellH - 2)
-                            .attr('stroke', '#444').attr('stroke-width', 0.75)
-                            .attr('pointer-events', 'none');
-
-                        cell.on('click', (event) => {
-                            event.stopPropagation();
-                            showCellInfo(null, true);
-                        });
+                        sx = bx + dpF0 * bw; sw = (dpF1 - dpF0) * bw;
+                        sy = by + (tp / effTpSize) * bh; sh = bh / effTpSize;
+                    }
+                } else if (isTp) {
+                    if (tpVisual === 'cols') {
+                        sx = bx + (tp / effTpSize) * bw; sw = bw / effTpSize;
+                        sy = by; sh = bh;
+                    } else {
+                        sx = bx; sw = bw;
+                        sy = by + (tp / effTpSize) * bh; sh = bh / effTpSize;
+                    }
+                } else {
+                    if (dpVisual === 'cols') {
+                        sx = bx + dpF0 * bw; sw = (dpF1 - dpF0) * bw;
+                        sy = by; sh = bh;
+                    } else {
+                        sx = bx; sw = bw;
+                        sy = by + dpF0 * bh; sh = (dpF1 - dpF0) * bh;
                     }
                 }
-            }
-        } else if (aRowIsDp) {
-            // Horizontal stripes on C
-            for (let dp = 0; dp < dpSize; dp++) {
-                const rankColor = RANK_COLORS[dp % RANK_COLORS.length];
-                const bandY = originY + rowFracs[dp] * hC;
-                const bandH = (rowFracs[dp + 1] - rowFracs[dp]) * hC;
-                const cell = g.append('rect')
-                    .attr('x', originX).attr('y', bandY)
-                    .attr('width', wC).attr('height', bandH)
-                    .attr('fill', rankColor).attr('fill-opacity', 0.3)
-                    .attr('stroke', 'none')
+
+                const el = g.append('rect')
+                    .attr('x', sx).attr('y', sy).attr('width', sw).attr('height', sh)
+                    .attr('fill', cellColor).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none')
                     .style('cursor', 'pointer');
 
-                cell.on('mouseenter', function() {
-                    d3.select(this).attr('fill-opacity', 0.55).attr('stroke', '#fff').attr('stroke-width', 1.5);
+                const cellData = { el, dp, tp, rankIdx, key, isTp, isDp };
+                allShardCells.push(cellData);
+
+                el.on('mouseenter', () => {
+                    highlightShardCells(c => {
+                        const dpMatch = !isDp || !c.isDp || c.dp === dp;
+                        const tpMatch = !isTp || !c.isTp || c.tp === tp;
+                        return dpMatch && tpMatch;
+                    });
+                    showTooltip({ dp: isDp ? dp : null, tp: isTp ? tp : null }, tensor, tooltipX, tooltipY);
                 });
-                cell.on('mouseleave', function() {
-                    d3.select(this).attr('fill-opacity', 0.3).attr('stroke', 'none');
-                });
-                cell.on('click', (event) => {
-                    event.stopPropagation();
-                    showCellInfo(dp, false);
+                el.on('mouseleave', () => {
+                    clearShardHighlight();
+                    showTooltip(null);
                 });
             }
-            for (let dp = 1; dp < dpSize; dp++) {
-                const ly = originY + rowFracs[dp] * hC;
-                g.append('line')
-                    .attr('x1', originX).attr('y1', ly)
-                    .attr('x2', originX + wC).attr('y2', ly)
-                    .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+        }
+
+        // Boundary lines
+        if (effTpSize > 1) {
+            for (let tp = 1; tp < effTpSize; tp++) {
+                if (tpVisual === 'cols') {
+                    const lx = bx + (tp / effTpSize) * bw;
+                    g.append('line')
+                        .attr('x1', lx).attr('y1', by).attr('x2', lx).attr('y2', by + bh)
+                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+                } else {
+                    const ly = by + (tp / effTpSize) * bh;
+                    g.append('line')
+                        .attr('x1', bx).attr('y1', ly).attr('x2', bx + bw).attr('y2', ly)
+                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+                }
+            }
+        }
+        if (effDpSize > 1) {
+            for (let dp = 1; dp < effDpSize; dp++) {
+                if (dpVisual === 'cols') {
+                    const lx = bx + dpFracs[dp] * bw;
+                    g.append('line')
+                        .attr('x1', lx).attr('y1', by).attr('x2', lx).attr('y2', by + bh)
+                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+                } else {
+                    const ly = by + dpFracs[dp] * bh;
+                    g.append('line')
+                        .attr('x1', bx).attr('y1', ly).attr('x2', bx + bw).attr('y2', ly)
+                        .attr('stroke', '#fff').attr('stroke-width', 0.75).attr('stroke-opacity', 0.4);
+                }
+            }
+        }
+    }
+
+    // Draw sharding on all three matrices
+    const tooltipTpY = originY + hC + 20;
+    drawShardGrid(A, aX, originY, wA, hA, 'a', aX, tooltipTpY);
+    if (B_tensor) drawShardGrid(B_tensor, bX, bY_pos, wC, hB, 'b', originX, tooltipTpY);
+    drawShardGrid(C, originX, originY, wC, hC, 'c', originX, tooltipTpY);
+
+    // --- DP block-diagonal on result C (special case: attention score matmuls) ---
+    if (hasDp && isBlockDiag && colFracs) {
+        const offDiagCells = [];
+
+        for (let dr = 0; dr < dpSize; dr++) {
+            for (let dc = 0; dc < dpSize; dc++) {
+                const cellX = originX + colFracs[dc] * wC;
+                const cellW2 = (colFracs[dc + 1] - colFracs[dc]) * wC;
+                const cellY = originY + rowFracs[dr] * hC;
+                const cellH2 = (rowFracs[dr + 1] - rowFracs[dr]) * hC;
+
+                if (dr !== dc) {
+                    const bg = g.append('rect')
+                        .attr('x', cellX).attr('y', cellY)
+                        .attr('width', cellW2).attr('height', cellH2)
+                        .attr('fill', '#000').attr('fill-opacity', 0.35)
+                        .attr('stroke', '#333').attr('stroke-width', 0.5);
+
+                    g.append('line')
+                        .attr('x1', cellX + 2).attr('y1', cellY + 2)
+                        .attr('x2', cellX + cellW2 - 2).attr('y2', cellY + cellH2 - 2)
+                        .attr('stroke', '#444').attr('stroke-width', 0.75)
+                        .attr('pointer-events', 'none');
+                    g.append('line')
+                        .attr('x1', cellX + cellW2 - 2).attr('y1', cellY + 2)
+                        .attr('x2', cellX + 2).attr('y2', cellY + cellH2 - 2)
+                        .attr('stroke', '#444').attr('stroke-width', 0.75)
+                        .attr('pointer-events', 'none');
+
+                    const hoverRect = g.append('rect')
+                        .attr('x', cellX).attr('y', cellY)
+                        .attr('width', cellW2).attr('height', cellH2)
+                        .attr('fill', 'transparent')
+                        .style('cursor', 'pointer');
+
+                    offDiagCells.push({ el: bg, dr, dc, hover: hoverRect });
+
+                    hoverRect.on('mouseenter', () => {
+                        highlightShardCells(c => c.dp === dr);
+                        for (const oc of offDiagCells) {
+                            oc.el.attr('fill-opacity', oc.dr === dr ? 0.5 : 0.35);
+                            if (oc.dr === dr) oc.el.attr('stroke', '#888').attr('stroke-width', 1);
+                            else oc.el.attr('stroke', '#333').attr('stroke-width', 0.5);
+                        }
+                        showTooltip({ dp: dr, skipped: true }, C, originX, tooltipTpY);
+                    });
+                    hoverRect.on('mouseleave', () => {
+                        clearShardHighlight();
+                        for (const oc of offDiagCells) {
+                            oc.el.attr('fill-opacity', 0.35).attr('stroke', '#333').attr('stroke-width', 0.5);
+                        }
+                        showTooltip(null);
+                    });
+                }
             }
         }
     }
@@ -415,14 +424,14 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
     const colW = wC / cols_b;
 
     g.append('rect')
-        .attr('x', originX - wA - pad).attr('y', originY + highlightRow * rowH)
+        .attr('x', aX).attr('y', originY + highlightRow * rowH)
         .attr('width', wA).attr('height', Math.max(rowH, 2))
         .attr('fill', '#fff').attr('fill-opacity', 0.25)
         .attr('stroke', '#fff').attr('stroke-width', 1);
 
     if (B_tensor) {
         g.append('rect')
-            .attr('x', originX + highlightCol * colW).attr('y', originY - hB - pad)
+            .attr('x', originX + highlightCol * colW).attr('y', bY_pos)
             .attr('width', Math.max(colW, 2)).attr('height', hB)
             .attr('fill', '#fff').attr('fill-opacity', 0.25)
             .attr('stroke', '#fff').attr('stroke-width', 1);
@@ -465,10 +474,11 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
         noteY += 18;
     }
 
-    // --- DP info section ---
-    if (hasDp) {
+    // --- Sharding info section ---
+    const hasAnySharding = allShardCells.length > 0;
+    if (hasAnySharding) {
         noteY += 4;
-        if (isBlockDiag) {
+        if (hasDp && isBlockDiag) {
             g.append('text').attr('class', 'dim-label')
                 .attr('x', svgW / 2).attr('y', noteY)
                 .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '10px')
@@ -479,13 +489,13 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
                 .attr('text-anchor', 'middle').attr('fill', '#888').attr('font-size', '9px')
                 .text('(sequences don\'t attend across DP boundaries)');
             noteY += 18;
-        } else if (aRowIsDp && B_tensor && B_tensor.dpSharded) {
+        } else if (hasDp && aRowIsDp && B_tensor && B_tensor.dpSharded) {
             g.append('text').attr('class', 'dim-label')
                 .attr('x', svgW / 2).attr('y', noteY)
                 .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '10px')
                 .text('Each DP rank computes independently on its portion');
             noteY += 18;
-        } else if (aRowIsDp) {
+        } else if (hasDp && aRowIsDp) {
             g.append('text').attr('class', 'dim-label')
                 .attr('x', svgW / 2).attr('y', noteY)
                 .attr('text-anchor', 'middle').attr('fill', '#e67e22').attr('font-size', '10px')
@@ -493,20 +503,19 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
             noteY += 18;
         }
 
-        // Legend + click hint
-        g.append('text').attr('class', 'dim-label')
-            .attr('x', svgW / 2).attr('y', noteY)
-            .attr('text-anchor', 'middle').attr('fill', '#666').attr('font-size', '9px')
-            .text('Click a colored region for details');
-        noteY += 14;
-
-        const legendCols = Math.min(dpSize, 4);
-        const legendRows = Math.ceil(dpSize / legendCols);
+        // Rank legend
+        const effDpSize = hasDp ? dpSize : 1;
+        const effTpSize = (tpSize > 1 && (A.tpSharded || (B_tensor && B_tensor.tpSharded) || C.tpSharded)) ? tpSize : 1;
+        const totalRanks = effDpSize * effTpSize;
+        const legendCols = Math.min(totalRanks, 4);
+        const legendRows = Math.ceil(totalRanks / legendCols);
         const colWLeg = svgW / legendCols;
 
-        for (let ri = 0; ri < dpSize; ri++) {
+        for (let ri = 0; ri < totalRanks; ri++) {
             const col = ri % legendCols;
             const row = Math.floor(ri / legendCols);
+            const dpRank = Math.floor(ri / effTpSize);
+            const tpRank = ri % effTpSize;
             const rankColor = RANK_COLORS[ri % RANK_COLORS.length];
             const lx = col * colWLeg + 12;
             const ly = noteY + row * 18;
@@ -516,29 +525,28 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
                 .attr('cx', lx + 4).attr('cy', ly - 3)
                 .attr('r', 5).attr('fill', rankColor).attr('fill-opacity', 0.7);
 
-            let label = `DP Rank ${ri}`;
-            if (B_count > 1) {
-                const reqs = [];
-                for (let r = 0; r < B_count; r++) {
-                    if (Math.floor(r * dpSize / B_count) === ri) reqs.push(r);
-                }
-                label += ` (Req ${reqs.join(', ')})`;
-            }
+            let label = `R${ri}`;
+            if (effDpSize > 1 && effTpSize > 1) label += ` (DP${dpRank},TP${tpRank})`;
+            else if (effDpSize > 1) label += ` DP${dpRank}`;
+            else if (effTpSize > 1) label += ` TP${tpRank}`;
 
             legendItem.append('text').attr('class', 'dim-label')
                 .attr('x', lx + 12).attr('y', ly)
                 .attr('text-anchor', 'start').attr('fill', rankColor).attr('font-size', '10px')
                 .text(label);
 
-            legendItem.on('click', (event) => {
-                event.stopPropagation();
-                showCellInfo(ri, false);
+            legendItem.on('mouseenter', () => {
+                highlightShardCells(c => {
+                    const dpMatch = effDpSize <= 1 || !c.isDp || c.dp === dpRank;
+                    const tpMatch = effTpSize <= 1 || !c.isTp || c.tp === tpRank;
+                    return dpMatch && tpMatch;
+                });
+            });
+            legendItem.on('mouseleave', () => {
+                clearShardHighlight();
             });
         }
         noteY += legendRows * 18 + 8;
-
-        cellInfoY = noteY;
-        noteY += 24;
     }
 
     // --- TP info on weight ---
@@ -554,25 +562,6 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
             .attr('text-anchor', 'middle').attr('fill', '#7c8cf8').attr('font-size', '10px')
             .text(`${parallel} (${B_tensor.label}): each TP rank holds ${dimLabel}=${perRank}`);
         noteY += 16;
-
-        const tpLegCols = Math.min(bTpSize, 4);
-        const tpLegColW = svgW / tpLegCols;
-        for (let tp = 0; tp < bTpSize; tp++) {
-            const tpColor = TP_COLORS[tp % TP_COLORS.length];
-            const col = tp % tpLegCols;
-            const row = Math.floor(tp / tpLegCols);
-            const lx = col * tpLegColW + 12;
-            const ly = noteY + row * 16;
-            g.append('circle')
-                .attr('cx', lx + 4).attr('cy', ly - 3)
-                .attr('r', 4).attr('fill', tpColor).attr('fill-opacity', 0.7);
-            g.append('text').attr('class', 'dim-label')
-                .attr('x', lx + 12).attr('y', ly)
-                .attr('text-anchor', 'start').attr('fill', tpColor).attr('font-size', '9px')
-                .text(`TP${tp}: ${dimLabel} [${tp * perRank}\u2013${(tp + 1) * perRank - 1}]`);
-        }
-        const tpLegRows = Math.ceil(bTpSize / tpLegCols);
-        noteY += tpLegRows * 16 + 8;
     }
 
     // Reshape visualization if output shape differs from matmul result
@@ -630,8 +619,8 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
 
         const beforeGrp = matmulResultShape.length === 4
             ? { outer: matmulResultShape[0], inner: matmulResultShape[1] } : null;
-        drawDetailBlock3D(g, beforeX, noteY + maxTopPad, beforeW, beforeH, beforeD, C.color, '',
-            beforeGrp, cTpInfo, cDpInfo);
+        drawDetailBlock3D(g, beforeX, noteY + maxTopPad, beforeW, beforeH, beforeD, colorFor(C), '',
+            beforeGrp, cTpInfo, cDpInfo, null, C.color);
 
         const aNames = A.dimNames || [];
         const bNames = B_tensor && B_tensor.dimNames ? B_tensor.dimNames : [];
@@ -679,8 +668,8 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
 
         const afterX = reshLeftMargin + beforeTotalW + arrowGap;
         const afterGrp = shC.length === 4 ? { outer: shC[0], inner: shC[1] } : null;
-        drawDetailBlock3D(g, afterX, noteY + maxTopPad, afterW, afterH, afterD, C.color, C.label,
-            afterGrp, cTpInfo, cDpInfo);
+        drawDetailBlock3D(g, afterX, noteY + maxTopPad, afterW, afterH, afterD, colorFor(C), C.label,
+            afterGrp, cTpInfo, cDpInfo, null, C.color);
 
         const outNames = C.dimNames || [];
         const lastOutDim = outNames[outNames.length - 1] || '';
@@ -732,6 +721,7 @@ export function drawMatmulDetail(svg, op, tensorMap, params) {
     }
 
     svg.attr('height', noteY + 20);
+    baseSvgH = noteY + 20;
 }
 
 function drawAllReduceSection(g, x, y, tpSize, outputTensor, svgW) {

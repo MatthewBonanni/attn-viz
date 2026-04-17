@@ -1,6 +1,6 @@
 // shared.js — Shared utilities and helpers for detail panel visualizations
-import { TP_COLORS, RANK_COLORS } from '../render.js';
-export { TP_COLORS, RANK_COLORS };
+import { TP_COLORS, RANK_COLORS, SHARD_BASE, SHARD_OPACITY, SHARD_HIGHLIGHT_OPACITY } from '../render.js';
+export { TP_COLORS, RANK_COLORS, SHARD_BASE, SHARD_OPACITY, SHARD_HIGHLIGHT_OPACITY };
 
 export function detailMetrics() {
     const w = 480;
@@ -26,19 +26,20 @@ export function maskLayout(svgW, rows, cols) {
     return { cellSize, labelEvery, schematic };
 }
 
-export function drawDetailBlock(g, x, y, w, h, color, label) {
+export function drawDetailBlock(g, x, y, w, h, color, label, sharded) {
     g.append('rect')
         .attr('x', x).attr('y', y).attr('width', w).attr('height', h)
-        .attr('fill', color).attr('fill-opacity', 0.8)
-        .attr('stroke', d3.color(color).darker(0.3)).attr('stroke-width', 1)
-        .attr('rx', 3);
+        .attr('fill', sharded ? SHARD_BASE : color)
+        .attr('fill-opacity', sharded ? 1 : 0.85)
+        .attr('stroke', sharded ? 'none' : d3.color(color).darker(0.3))
+        .attr('stroke-width', sharded ? 0 : 1);
     g.append('text')
         .attr('class', 'tensor-label')
         .attr('x', x + w / 2).attr('y', y + h / 2 + 4)
         .text(label);
 }
 
-export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpInfo, dpInfo, onCellClick) {
+export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpInfo, dpInfo, onCellClick, originalColor) {
     const dx = d * 0.7;
     const dy = -d * 0.4;
 
@@ -56,8 +57,8 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         }
     }
 
-    const restoreOps = { front: [0.4, 'none', 0], right: [0.5, 'none', 0], top: [0.35, 'none', 0] };
-    const highlightOps = { front: [0.65, '#fff', 1.5], right: [0.85, '#fff', 1.5], top: [0.55, '#fff', 1] };
+    const restoreOps = { front: [SHARD_OPACITY, 'none', 0], right: [SHARD_OPACITY, 'none', 0], top: [SHARD_OPACITY, 'none', 0] };
+    const highlightOps = { front: [SHARD_HIGHLIGHT_OPACITY, '#fff', 1.5], right: [SHARD_HIGHLIGHT_OPACITY, '#fff', 1.5], top: [SHARD_HIGHLIGHT_OPACITY, '#fff', 1] };
 
     function setFace(face, dp, tp, on) {
         const [opacity, stroke, sw] = on ? highlightOps[face] : restoreOps[face];
@@ -78,10 +79,10 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
     function highlightRightCell(dp, tp) {
         clearAll();
         setFace('right', dp, tp, true);
-        if (tp === 0 && tpSize > 1) {
+        if (tp === 0) {
             for (let t = 0; t < tpSize; t++) setFace('front', dp, t, true);
         }
-        if (dp === 0 && tpSize > 1) {
+        if (dp === 0) {
             for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, tp, true);
         }
     }
@@ -90,7 +91,7 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         clearAll();
         for (let t = 0; t < tpSize; t++) setFace('front', dp, t, true);
         setFace('right', dp, 0, true);
-        if (dp === 0 && tpSize > 1) {
+        if (dp === 0) {
             for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, 0, true);
         }
     }
@@ -99,7 +100,7 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         clearAll();
         for (let d2 = 0; d2 < dpSize; d2++) setFace('top', d2, tp, true);
         setFace('right', 0, tp, true);
-        if (tp === 0 && tpSize > 1) {
+        if (tp === 0) {
             for (let t = 0; t < tpSize; t++) setFace('front', 0, t, true);
         }
     }
@@ -107,11 +108,11 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
     // Top face base
     g.append('polygon')
         .attr('points', `${x},${y} ${x+dx},${y+dy} ${x+w+dx},${y+dy} ${x+w},${y}`)
-        .attr('fill', d3.color(color).darker(0.4)).attr('stroke', 'none');
+        .attr('fill', hasParallelism ? SHARD_BASE : d3.color(color).darker(0.4)).attr('stroke', 'none');
     // Right face base
     g.append('polygon')
         .attr('points', `${x+w},${y} ${x+w+dx},${y+dy} ${x+w+dx},${y+h+dy} ${x+w},${y+h}`)
-        .attr('fill', d3.color(color).darker(0.8)).attr('stroke', 'none');
+        .attr('fill', hasParallelism ? SHARD_BASE : d3.color(originalColor || color).darker(0.8)).attr('stroke', 'none');
 
     if (hasParallelism) {
         const rx = x + w;
@@ -130,7 +131,7 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
                         `${rx + dx*tf1},${y + h*df1 + dy*tf1}`,
                         `${rx + dx*tf0},${y + h*df1 + dy*tf0}`,
                     ].join(' '))
-                    .attr('fill', cellColor).attr('fill-opacity', 0.5).attr('stroke', 'none')
+                    .attr('fill', cellColor).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none')
                     .style('cursor', 'pointer');
 
                 elements[dp][tp].right.push(cell);
@@ -152,14 +153,14 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
                             `${x + w + dx*tf1},${y + dy*tf1}`,
                             `${x + w + dx*tf0},${y + dy*tf0}`,
                         ].join(' '))
-                        .attr('fill', cellColor).attr('fill-opacity', 0.35).attr('stroke', 'none')
+                        .attr('fill', cellColor).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none')
                         .style('cursor', 'default');
 
                     elements[dp][tp].top.push(topEl);
 
                     topEl.on('mouseenter', () => {
                         highlightTopBand(tp);
-                        if (onCellClick) onCellClick({ dp: null, tp, rankIdx: tp });
+                        if (onCellClick) onCellClick({ dp: 0, tp, rankIdx: tp });
                     });
                     topEl.on('mouseleave', () => {
                         clearAll();
@@ -167,6 +168,29 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
                     });
                 }
             }
+        }
+
+        // When TP = 1, draw a single rank-0 overlay on the top face
+        if (tpSize === 1) {
+            const topColor = RANK_COLORS[0];
+            const topEl = g.append('polygon')
+                .attr('points', [
+                    `${x},${y}`,
+                    `${x + dx},${y + dy}`,
+                    `${x + w + dx},${y + dy}`,
+                    `${x + w},${y}`,
+                ].join(' '))
+                .attr('fill', topColor).attr('fill-opacity', SHARD_OPACITY).attr('stroke', 'none')
+                .style('cursor', 'pointer');
+            elements[0][0].top.push(topEl);
+            topEl.on('mouseenter', () => {
+                highlightTopBand(0);
+                if (onCellClick) onCellClick({ dp: 0, tp: 0, rankIdx: 0 });
+            });
+            topEl.on('mouseleave', () => {
+                clearAll();
+                if (onCellClick) onCellClick(null);
+            });
         }
 
         for (let tp = 1; tp < tpSize; tp++) {
@@ -192,8 +216,10 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
     // Front face
     g.append('rect')
         .attr('x', x).attr('y', y).attr('width', w).attr('height', h)
-        .attr('fill', color).attr('fill-opacity', 0.85)
-        .attr('stroke', d3.color(color).darker(0.3)).attr('stroke-width', 1);
+        .attr('fill', hasParallelism ? SHARD_BASE : (originalColor || color))
+        .attr('fill-opacity', hasParallelism ? 1 : 0.85)
+        .attr('stroke', hasParallelism ? 'none' : d3.color(originalColor || color).darker(0.3))
+        .attr('stroke-width', hasParallelism ? 0 : 1);
 
     if (hasParallelism) {
         for (let dp = 0; dp < dpSize; dp++) {
@@ -205,8 +231,8 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
             const cell = g.append('rect')
                 .attr('x', x).attr('y', bandY)
                 .attr('width', w).attr('height', bandH)
-                .attr('fill', dpSize > 1 ? cellColor : 'transparent')
-                .attr('fill-opacity', dpSize > 1 ? 0.4 : 0)
+                .attr('fill', cellColor)
+                .attr('fill-opacity', SHARD_OPACITY)
                 .attr('stroke', 'none')
                 .style('cursor', 'pointer');
 
@@ -214,7 +240,7 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
 
             cell.on('mouseenter', () => {
                 highlightFrontStripe(dp);
-                if (onCellClick) onCellClick({ dp, tp: null, rankIdx: dp * tpSize });
+                if (onCellClick) onCellClick({ dp, tp: 0, rankIdx: dp * tpSize });
             });
             cell.on('mouseleave', () => {
                 clearAll();
@@ -233,4 +259,27 @@ export function drawDetailBlock3D(g, x, y, w, h, d, color, label, grouping, tpIn
         .attr('class', 'tensor-label')
         .attr('x', x + w / 2).attr('y', y + h / 2 + 4)
         .text(label);
+
+    return {
+        highlightTP(tp) {
+            clearAll();
+            for (let d2 = 0; d2 < dpSize; d2++) {
+                setFace('right', d2, tp, true);
+                setFace('top', d2, tp, true);
+            }
+            for (let t = 0; t < tpSize; t++) setFace('front', 0, t, t === tp);
+        },
+        highlightDP(dp) {
+            clearAll();
+            for (let t = 0; t < tpSize; t++) {
+                setFace('front', dp, t, true);
+                setFace('right', dp, t, true);
+            }
+        },
+        highlightCell(dp, tp) {
+            clearAll();
+            highlightRightCell(dp, tp);
+        },
+        clear() { clearAll(); },
+    };
 }
