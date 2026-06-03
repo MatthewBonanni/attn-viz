@@ -29,6 +29,7 @@ const SLIDER_DEFS = {
     tp_size:{ label: 'TP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     dp_size:{ label: 'DP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
+    window_size: { label: 'W (window)',    min: 1, max: 8192, step: 1,  default: 256, logScale: true },
 };
 
 // Find the divisor of n that is closest to target
@@ -70,10 +71,10 @@ const PRESETS = [
     { name: 'Llama 3.1 8B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8 },
     { name: 'Llama 3.1 70B', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'Llama 3.1 405B', variant: 'gqa', n_h: 128, d_h: 128, n_kv: 8 },
-    { name: 'Mistral 7B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8 },
+    { name: 'Mistral 7B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 8, slidingWindow: true, window_size: 4096 },
     { name: 'Qwen 2.5 72B', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'Qwen 3 235B (MoE)', variant: 'gqa', n_h: 64, d_h: 192, n_kv: 4 },
-    { name: 'Gemma 3 27B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 16 },
+    { name: 'Gemma 3 27B', variant: 'gqa', n_h: 32, d_h: 128, n_kv: 16, slidingWindow: true, window_size: 1024 },
     { name: 'Phi-4 14B', variant: 'gqa', n_h: 40, d_h: 128, n_kv: 10 },
     { name: 'Command A (111B, MoE)', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'StarCoder (15B)', variant: 'mqa', n_h: 48, d_h: 128 },
@@ -96,6 +97,7 @@ for (const [k, v] of Object.entries(SLIDER_DEFS)) {
 }
 params.pagedAttn = false;
 params.flashAttn = false;
+params.slidingWindow = false;
 params.block_q = 128;
 params.block_kv = 128;
 params.splitKV = false;
@@ -104,6 +106,17 @@ params.seqLens = [params.S];     // per-request total S (cached + new)
 params.queryLens = [params.S_q]; // per-request S_q (new query tokens)
 
 let currentVariant = 'mha';
+
+// Apply a preset's model config to params, including sliding-window state, and
+// sync the SWA toggle UI. Execution toggles (flash/paged) are left untouched.
+function applyPresetParams(preset) {
+    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
+        if (preset[key] != null) params[key] = preset[key];
+    }
+    params.slidingWindow = !!preset.slidingWindow;
+    if (preset.window_size != null) params.window_size = preset.window_size;
+    d3.select('#toggle-swa').classed('active', params.slidingWindow);
+}
 
 // --- SVG + zoom setup ---
 
@@ -152,9 +165,7 @@ function buildVariantTabs() {
                 const presetIdx = VARIANT_DEFAULT_PRESETS[v.id] || 0;
                 const preset = PRESETS[presetIdx];
                 if (preset && preset.variant) {
-                    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
-                        if (preset[key] != null) params[key] = preset[key];
-                    }
+                    applyPresetParams(preset);
                 }
                 d3.select('#preset-select').property('value', String(presetIdx));
                 updateVariantDesc();
@@ -190,9 +201,7 @@ function buildPresets() {
 
         hideDetail();
         currentVariant = preset.variant;
-        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
-            if (preset[key] != null) params[key] = preset[key];
-        }
+        applyPresetParams(preset);
 
         d3.select('#variant-tabs').selectAll('button').classed('active', false);
         d3.select('#variant-tabs').select(`[data-variant="${currentVariant}"]`).classed('active', true);
@@ -218,6 +227,14 @@ function setupToggles() {
     d3.select('#toggle-flash').on('click', function() {
         params.flashAttn = !params.flashAttn;
         d3.select(this).classed('active', params.flashAttn);
+        update();
+    });
+
+    // Sliding Window Attention toggle
+    d3.select('#toggle-swa').on('click', function() {
+        params.slidingWindow = !params.slidingWindow;
+        d3.select(this).classed('active', params.slidingWindow);
+        buildSliders();
         update();
     });
 }
@@ -398,6 +415,11 @@ function buildSliders() {
         }
         if (currentVariant === 'gqa' && key === 'n_kv') continue; // already built above
         buildSlider(dimContainer, key);
+    }
+    // Sliding-window slider lives inside #sliders so it shares the .slider-group
+    // rhythm of the head sliders (rather than the .controls flex gap).
+    if (params.slidingWindow) {
+        buildSlider(dimContainer, 'window_size');
     }
 
     // Parallelism sliders (TP + DP)
@@ -604,7 +626,14 @@ function updateDerived() {
         const blocksPerSeq = sLens.map(s => Math.ceil(s / params.block_size));
         const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
         rtHtml += `<div class="derived-dim">Blocks per req: <span>[${blocksPerSeq.join(', ')}]</span></div>`;
-        rtHtml += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
+        if (params.slidingWindow) {
+            const W = params.window_size;
+            const livePerSeq = sLens.map(s => W < s ? Math.ceil(s / params.block_size) - Math.floor((s - W) / params.block_size) : Math.ceil(s / params.block_size));
+            const totalLive = livePerSeq.reduce((a, b) => a + b, 0);
+            rtHtml += `<div class="derived-dim">Resident (window): <span>${totalLive}</span> of ${totalBlocks} blocks</div>`;
+        } else {
+            rtHtml += `<div class="derived-dim">Total KV blocks: <span>${totalBlocks}</span></div>`;
+        }
     }
     d3.select('#derived-runtime').html(rtHtml);
 
@@ -929,8 +958,28 @@ function annotateGraph(graph) {
     if (params.B > 1) addMultiRequestAnnotations(graph, params);
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.dp_size > 1) addDpAnnotations(graph, params);
+    if (params.slidingWindow) addSlidingWindowAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
     if (params.flashAttn) addFlashAttnAnnotations(graph, params);
+}
+
+// --- Sliding window attention annotations ---
+
+function addSlidingWindowAnnotations(graph, params) {
+    const W = params.window_size;
+    for (const t of graph.tensors) {
+        if (t.type === 'mask') {
+            t.window = W;
+            t.label = 'Mask (SWA)';
+            t.desc = `Sliding-window causal mask (window W=${W}). Position i attends only to keys j with i−W < j ≤ i — the most recent ${W} positions. Everything outside the band is set to −∞ before softmax.`;
+        }
+    }
+    for (const op of graph.ops) {
+        if (op.type === 'mask') {
+            op.window = W;
+            op.desc = `Apply sliding-window causal mask: keep scores[i,j] only where i−${W} < j ≤ i, set the rest to −∞, then row-wise softmax. Each query attends to at most W=${W} keys, bounding attention cost at long context.`;
+        }
+    }
 }
 
 function update() {
@@ -1376,6 +1425,10 @@ function addPagedAnnotations(graph, params) {
                 `Each sequence maps to non-contiguous blocks via a block table. ` +
                 `Block size=${bs}, blocks per seq: [${blocksPerSeq.join(', ')}], total blocks: ${totalBlocks}. ` +
                 `New S_q tokens are appended to the last block; a new block is allocated when the current one fills.`;
+            if (params.slidingWindow) {
+                t.desc += ` With sliding window W=${params.window_size}, only blocks covering the last W keys must stay resident — ` +
+                    `blocks fully older than the window are evicted and their physical slots reused.`;
+            }
         }
     }
 }

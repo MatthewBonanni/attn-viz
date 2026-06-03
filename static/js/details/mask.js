@@ -26,8 +26,32 @@ function drawPillLabel(g, x, y, text, fill) {
         .attr('fill', fill).attr('fill-opacity', 0.95).text(text);
 }
 
-// Draw a schematic causal mask (triangle) instead of individual cells
-function drawSchematicCausal(g, gridW, gridH, S_q, S, queryOffset, color, label) {
+// Build the attend-region polygon (points string) for one causal block in a box
+// (bx, by, bw, bh), supporting a sliding window. Without a window it's the causal
+// trapezoid; with one it's a diagonal band (offset+i−W < j ≤ offset+i).
+function bandPointsXY(bx, by, bw, bh, S_q, S, offset, window) {
+    const rightFrac = t => (offset + 1 + t * (S - 1 - offset)) / S;
+    const W = (window && window < S) ? window : S;
+    const leftFrac = t => rightFrac(t) - W / S;
+    const pts = [];
+    pts.push([bx + Math.min(1, rightFrac(0)) * bw, by]);
+    pts.push([bx + Math.min(1, rightFrac(1)) * bw, by + bh]);
+    const lf0 = leftFrac(0), lf1 = leftFrac(1);
+    pts.push([bx + Math.max(0, lf1) * bw, by + bh]);
+    if ((lf0 < 0) !== (lf1 < 0)) {
+        const t0 = -lf0 / (lf1 - lf0);
+        pts.push([bx, by + t0 * bh]);
+    }
+    pts.push([bx + Math.max(0, lf0) * bw, by]);
+    return pts.map(p => `${p[0]},${p[1]}`).join(' ');
+}
+
+function schematicBandPoints(gridW, gridH, y0, S_q, S, offset, window) {
+    return bandPointsXY(0, y0, gridW, gridH, S_q, S, offset, window);
+}
+
+// Draw a schematic causal mask (triangle/band) instead of individual cells
+function drawSchematicCausal(g, gridW, gridH, S_q, S, queryOffset, color, label, window) {
     const y0 = 10;
     const topAttendX = S_q === S ? 0 : ((queryOffset + 1) / S) * gridW;
     // Background (masked region)
@@ -35,20 +59,30 @@ function drawSchematicCausal(g, gridW, gridH, S_q, S, queryOffset, color, label)
         .attr('width', gridW).attr('height', gridH)
         .attr('fill', color === 'mask' ? '#2c3e50' : '#1a1d2a')
         .attr('fill-opacity', 0.5).attr('rx', 2);
-    // Attend region (lower-left triangle / trapezoid)
+    // Attend region (lower-left triangle / trapezoid / window band)
     const fill = color === 'mask' ? '#1abc9c' : '#f39c12';
     const opacity = color === 'mask' ? 0.7 : 0.5;
     g.append('polygon')
-        .attr('points', `0,${y0} ${topAttendX},${y0} ${gridW},${y0 + gridH} 0,${y0 + gridH}`)
+        .attr('points', schematicBandPoints(gridW, gridH, y0, S_q, S, queryOffset, window))
         .attr('fill', fill).attr('fill-opacity', opacity);
-    // Diagonal boundary
+    // Causal (upper-right) boundary
     g.append('line')
         .attr('x1', topAttendX).attr('y1', y0)
         .attr('x2', gridW).attr('y2', y0 + gridH)
         .attr('stroke', '#fff').attr('stroke-width', 1.5).attr('stroke-opacity', 0.4);
+    // Window lower-bound boundary
+    if (window && window < S) {
+        const lf0 = (queryOffset + 1 - window) / S;
+        const lf1 = (S - window) / S;
+        g.append('line')
+            .attr('x1', Math.max(0, lf0) * gridW).attr('y1', y0)
+            .attr('x2', Math.max(0, lf1) * gridW).attr('y2', y0 + gridH)
+            .attr('stroke', '#fff').attr('stroke-width', 1.5).attr('stroke-opacity', 0.4)
+            .attr('stroke-dasharray', '3,2');
+    }
     // Region labels — position at centroids of attend trapezoid / masked triangle
     if (color === 'mask') {
-        const attendCx = (topAttendX + gridW) / 4;
+        const attendCx = window && window < S ? gridW * 0.5 : (topAttendX + gridW) / 4;
         const attendCy = y0 + gridH * 2 / 3;
         drawPillLabel(g, attendCx, attendCy, '1', '#fff');
         if (gridW - topAttendX > 30) {
@@ -103,6 +137,8 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
     const g = svg.append('g').attr('transform', `translate(${pad}, 38)`);
 
     const queryOffset = S - S_q;
+    const swaW = (params.slidingWindow && params.window_size < S) ? params.window_size : null;
+    const inWindow = (i, j) => swaW === null || j > (i + queryOffset - swaW);
     const d_h = params.d_h || 64;
     const scale = 1 / Math.sqrt(d_h);
 
@@ -123,7 +159,7 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
             .attr('x', gridW / 2).attr('y', yOff - 14)
             .text(`Causal Mask (${S_q}\u00d7${S})`);
         const maskG = g.append('g').attr('transform', `translate(0, ${yOff})`);
-        drawSchematicCausal(maskG, gridW, gridH, S_q, S, queryOffset, 'mask');
+        drawSchematicCausal(maskG, gridW, gridH, S_q, S, queryOffset, 'mask', null, swaW);
 
         const legendY = yOff + gridH + 26;
         g.append('rect').attr('x', 0).attr('y', legendY).attr('width', 12).attr('height', 12)
@@ -142,7 +178,7 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
             .text('Attention Weights (after softmax)');
         y2 += 16;
         const hg = g.append('g').attr('transform', `translate(0, ${y2})`);
-        drawSchematicCausal(hg, gridW, gridH, S_q, S, queryOffset, 'heat');
+        drawSchematicCausal(hg, gridW, gridH, S_q, S, queryOffset, 'heat', null, swaW);
         g.append('text').attr('class', 'dim-label')
             .attr('x', gridW / 2).attr('y', y2 + gridH + 24)
             .attr('text-anchor', 'middle').attr('fill', '#f39c12')
@@ -170,7 +206,7 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
         for (let j = 0; j < S; j++) {
             const s = pseudoScore(i, j) * scale;
             rawRow.push(s);
-            maskedScores.push((i + queryOffset) >= j ? s : -Infinity);
+            maskedScores.push(((i + queryOffset) >= j && inWindow(i, j)) ? s : -Infinity);
         }
         rawScoreGrid.push(rawRow);
         const exps = maskedScores.map(s => s === -Infinity ? 0 : Math.exp(s));
@@ -226,7 +262,7 @@ export function drawMaskDetail(svg, _op, _tensorMap, params) {
 
     for (let i = 0; i < S_q; i++) {
         for (let j = 0; j < S; j++) {
-            const allowed = (i + queryOffset) >= j;
+            const allowed = (i + queryOffset) >= j && inWindow(i, j);
             g.append('rect')
                 .attr('x', j * cellSize).attr('y', yOff + i * cellSize + 10)
                 .attr('width', cellSize - (cellSize > 3 ? 1 : 0)).attr('height', cellSize - (cellSize > 3 ? 1 : 0))
@@ -367,9 +403,12 @@ export function drawMaskTensorDetail(svg, _tensor, params) {
         .attr('x', gridW / 2).attr('y', -14)
         .text(`Causal Mask (${S_q}\u00d7${S})`);
 
+    const swaW = (params.slidingWindow && params.window_size < S) ? params.window_size : null;
+    const inWindow = (i, j, qOff) => swaW === null || j > (i + qOff - swaW);
+
     if (schematic) {
         const queryOffset = S - S_q;
-        drawSchematicCausal(g, gridW, gridH, S_q, S, queryOffset, 'mask');
+        drawSchematicCausal(g, gridW, gridH, S_q, S, queryOffset, 'mask', null, swaW);
 
         const descY = gridH + 26;
         g.append('rect').attr('x', 0).attr('y', descY).attr('width', 12).attr('height', 12)
@@ -394,7 +433,7 @@ export function drawMaskTensorDetail(svg, _tensor, params) {
     const showCellText = cellSize >= 16;
     for (let i = 0; i < S_q; i++) {
         for (let j = 0; j < S; j++) {
-            const allowed = (i + queryOffset) >= j;
+            const allowed = (i + queryOffset) >= j && inWindow(i, j, queryOffset);
             g.append('rect')
                 .attr('x', j * cellSize).attr('y', i * cellSize + 10)
                 .attr('width', cellSize - (cellSize > 3 ? 1 : 0)).attr('height', cellSize - (cellSize > 3 ? 1 : 0))
@@ -463,9 +502,12 @@ function _drawBlockDiagMaskOnly(svg, params) {
         cumS.push(cumS[r] + sLens[r]);
     }
 
+    const swaW = params.slidingWindow ? params.window_size : null;
+    const winFor = ns => (swaW !== null && swaW < ns) ? swaW : null;
+
     g.append('text').attr('class', 'tensor-label')
         .attr('x', gridW / 2).attr('y', -14)
-        .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+        .text(`Block-Diagonal ${swaW !== null ? 'Sliding-Window' : 'Causal'} Mask (B=${params.B})`);
 
     function drawBoundaryLines(gg, yBase) {
         for (let r = 1; r < sqLens.length; r++) {
@@ -498,12 +540,11 @@ function _drawBlockDiagMaskOnly(svg, params) {
             const bw = (ns / dispCols) * gridW;
             const bh = (nq / dispRows) * gridH;
             const qOff = ns - nq;
-            const topX = bx + ((qOff + 1) / ns) * bw;
             g.append('rect').attr('x', bx).attr('y', by)
                 .attr('width', bw).attr('height', bh)
                 .attr('fill', '#2c3e50').attr('fill-opacity', 0.5);
             g.append('polygon')
-                .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
+                .attr('points', bandPointsXY(bx, by, bw, bh, nq, ns, qOff, winFor(ns)))
                 .attr('fill', '#1abc9c').attr('fill-opacity', 0.7);
         }
         drawBoundaryLines(g, 10);
@@ -538,10 +579,12 @@ function _drawBlockDiagMaskOnly(svg, params) {
             for (let i = 0; i < nq; i++) {
                 for (let j = 0; j < ns; j++) {
                     let fill, opacity;
+                    const win = winFor(ns);
+                    const inWin = win === null || j > (ns - nq + i - win);
                     if (si !== sj) {
                         fill = '#1a1520'; opacity = 0.8;
                     } else {
-                        const allowed = j <= (ns - nq + i);
+                        const allowed = j <= (ns - nq + i) && inWin;
                         fill = allowed ? '#1abc9c' : '#2c3e50';
                         opacity = allowed ? 0.85 : 0.5;
                     }
@@ -552,7 +595,7 @@ function _drawBlockDiagMaskOnly(svg, params) {
                         .attr('fill', fill).attr('fill-opacity', opacity)
                         .attr('stroke', '#1a1d2a').attr('stroke-width', 0.3);
                     if (showCellText) {
-                        const allowed = si === sj && j <= (ns - nq + i);
+                        const allowed = si === sj && j <= (ns - nq + i) && inWin;
                         g.append('text')
                             .attr('x', (colOff + j) * cellSize + cellSize / 2)
                             .attr('y', 10 + (rowOff + i) * cellSize + cellSize / 2 + 4)
@@ -610,6 +653,10 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
         cumS.push(cumS[r] + sLens[r]);
     }
 
+    const swaW = params.slidingWindow ? params.window_size : null;
+    const winFor = ns => (swaW !== null && swaW < ns) ? swaW : null;
+    const maskKind = swaW !== null ? 'Sliding-Window' : 'Causal';
+
     // --- Helper: draw block-diagonal boundary lines ---
     function drawBoundaryLines(gg, yBase) {
         for (let r = 1; r < sqLens.length; r++) {
@@ -644,17 +691,17 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
             const bw = (ns / dispCols) * gridW;
             const bh = (nq / dispRows) * gridH;
             const qOff = ns - nq;
-            const topX = bx + ((qOff + 1) / ns) * bw;
+            const bandPts = bandPointsXY(bx, by, bw, bh, nq, ns, qOff, winFor(ns));
             if (fillColor === 'mask') {
                 gg.append('rect').attr('x', bx).attr('y', by)
                     .attr('width', bw).attr('height', bh)
                     .attr('fill', '#2c3e50').attr('fill-opacity', 0.5);
                 gg.append('polygon')
-                    .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
+                    .attr('points', bandPts)
                     .attr('fill', '#1abc9c').attr('fill-opacity', 0.7);
             } else if (fillColor === 'heat') {
                 gg.append('polygon')
-                    .attr('points', `${bx},${by} ${topX},${by} ${bx + bw},${by + bh} ${bx},${by + bh}`)
+                    .attr('points', bandPts)
                     .attr('fill', '#f39c12').attr('fill-opacity', 0.5);
             } else {
                 // QK^T scores
@@ -686,7 +733,7 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
         // --- Part 1: Causal mask schematic ---
         g.append('text').attr('class', 'tensor-label')
             .attr('x', gridW / 2).attr('y', curY - 14)
-            .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+            .text(`Block-Diagonal ${maskKind} Mask (B=${params.B})`);
         drawSchematicBlockDiag(g, curY, 'mask', 'S');
 
         const legendY = curY + gridH + 26;
@@ -743,10 +790,12 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
         const colStart = cumS[reqIdx];
         const ns = sLens[reqIdx], nq = sqLens[reqIdx];
         const qOff = ns - nq;
+        const win = winFor(ns);
         for (let j = 0; j < ns; j++) {
             const s = pseudoScore(localI, j) * scaleVal;
             rawRow[colStart + j] = s;
-            if ((localI + qOff) >= j) maskedRow[colStart + j] = s;
+            const inWin = win === null || j > (localI + qOff - win);
+            if ((localI + qOff) >= j && inWin) maskedRow[colStart + j] = s;
         }
         rawScoreGrid.push(rawRow);
         const exps = maskedRow.map(s => s === -Infinity ? 0 : Math.exp(s));
@@ -836,10 +885,10 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
 
     const yOff = gridH + 46;
 
-    // --- Part 1: Causal mask ---
+    // --- Part 1: Causal / sliding-window mask ---
     g.append('text').attr('class', 'tensor-label')
         .attr('x', gridW / 2).attr('y', yOff - 14)
-        .text(`Block-Diagonal Causal Mask (B=${params.B})`);
+        .text(`Block-Diagonal ${maskKind} Mask (B=${params.B})`);
 
     let rowOff = 0;
     for (let si = 0; si < sqLens.length; si++) {
@@ -848,14 +897,16 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
 
         for (let sj = 0; sj < sLens.length; sj++) {
             const ns = sLens[sj];
+            const win = winFor(ns);
 
             for (let i = 0; i < nq; i++) {
                 for (let j = 0; j < ns; j++) {
                     let fill, opacity;
+                    const inWin = win === null || j > (ns - nq + i - win);
                     if (si !== sj) {
                         fill = '#1a1520'; opacity = 0.8;
                     } else {
-                        const allowed = j <= (ns - nq + i);
+                        const allowed = j <= (ns - nq + i) && inWin;
                         fill = allowed ? '#1abc9c' : '#2c3e50';
                         opacity = allowed ? 0.85 : 0.5;
                     }
@@ -868,7 +919,7 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
                         .attr('stroke', '#1a1d2a').attr('stroke-width', 0.3);
 
                     if (showCellText) {
-                        const allowed = si === sj && j <= (ns - nq + i);
+                        const allowed = si === sj && j <= (ns - nq + i) && inWin;
                         g.append('text')
                             .attr('x', (colOff + j) * cellSize + cellSize / 2)
                             .attr('y', yOff + (rowOff + i) * cellSize + cellSize / 2 + 13)

@@ -157,11 +157,11 @@ export function drawTensorBlock(g, x, y, tensor, dimNames) {
     // Front face
     if (type === 'mask') {
         if (tensor.multiRequest && tensor.seqLens) {
-            drawMultiRequestMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens);
+            drawMultiRequestMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens, tensor.window);
         } else if (tensor.pagedMask && tensor.seqLens) {
-            drawPagedMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens);
+            drawPagedMaskFace(group, x, y, w, h, tensor.seqLens, tensor.queryLens, tensor.window);
         } else {
-            drawMaskFace(group, x, y, w, h, shape, color);
+            drawMaskFace(group, x, y, w, h, shape, color, tensor.window);
         }
         group.append('rect')
             .attr('x', x).attr('y', y)
@@ -482,19 +482,45 @@ function drawParallelismDepthFaces(group, x, y, w, h, off, tpSize, dpSize, skipT
 
 // --- Causal mask face ---
 
-function drawMaskFace(group, x, y, w, h, shape, color) {
+// Build the attend-region polygon for one causal block. When window W is set,
+// the region is a diagonal band (i−W < j ≤ i); otherwise the full causal trapezoid.
+// (x, y, w, h) is the block box; offset = S − S_q is the query→key alignment.
+function attendBandPoints(x, y, w, h, S_q, S, offset, window) {
+    // Right boundary fraction (of w) as a function of vertical param t∈[0,1] (top→bottom).
+    const rightFrac = t => (offset + 1 + t * (S - 1 - offset)) / S;
+    const W = (window && window < S) ? window : S; // W≥S ⇒ no lower bound (full causal)
+    const leftFrac = t => rightFrac(t) - W / S;
+
+    const pts = [];
+    // Right edge: top → bottom
+    pts.push([x + Math.min(1, rightFrac(0)) * w, y]);
+    pts.push([x + Math.min(1, rightFrac(1)) * w, y + h]);
+    // Left edge: bottom → top, clamping the lower bound at column 0
+    const lf0 = leftFrac(0), lf1 = leftFrac(1);
+    pts.push([x + Math.max(0, lf1) * w, y + h]);
+    if ((lf0 < 0) !== (lf1 < 0)) {
+        // Lower-bound diagonal crosses column 0 — insert the kink point
+        const t0 = -lf0 / (lf1 - lf0);
+        pts.push([x, y + t0 * h]);
+    }
+    pts.push([x + Math.max(0, lf0) * w, y]);
+    return pts;
+}
+
+function drawMaskFace(group, x, y, w, h, shape, color, window) {
     const S = shape[shape.length - 1];
     const S_q = shape.length >= 2 ? shape[shape.length - 2] : S;
     const blocked = '#2c3e50';
     // Causal offset: query row i attends to keys 0..S-S_q+i
     const offset = S - S_q;
+    const W = (window && window < S) ? window : null;
 
     if (S <= 16 && S_q <= 16) {
         const cellW = w / S;
         const cellH = h / S_q;
         for (let i = 0; i < S_q; i++) {
             for (let j = 0; j < S; j++) {
-                const allowed = j <= offset + i;
+                const allowed = j <= offset + i && (W === null || j > offset + i - W);
                 group.append('rect')
                     .attr('x', x + j * cellW)
                     .attr('y', y + i * cellH)
@@ -513,15 +539,13 @@ function drawMaskFace(group, x, y, w, h, shape, color) {
             .attr('fill', blocked).attr('fill-opacity', 0.6)
             .attr('stroke', d3.color(color).darker(0.3))
             .attr('stroke-width', 1);
-        // Causal triangle: diagonal goes from (offset/S * w, 0) to (w, h)
-        const diagX = (offset / S) * w;
+        const pts = attendBandPoints(x, y, w, h, S_q, S, offset, window);
         group.append('polygon')
-            .attr('points', polyStr([
-                [x, y], [x, y + h], [x + w, y + h], [x + diagX, y]
-            ]))
+            .attr('points', polyStr(pts))
             .attr('fill', color).attr('fill-opacity', 0.85);
+        // Causal (upper-right) boundary line
         group.append('line')
-            .attr('x1', x + diagX).attr('y1', y)
+            .attr('x1', x + (offset / S) * w).attr('y1', y)
             .attr('x2', x + w).attr('y2', y + h)
             .attr('stroke', '#fff').attr('stroke-width', 1).attr('stroke-opacity', 0.3);
     }
@@ -529,7 +553,7 @@ function drawMaskFace(group, x, y, w, h, shape, color) {
 
 // --- Multi-request mask face (B > 1, block-diagonal) ---
 
-function drawMultiRequestMaskFace(group, x, y, w, h, seqLens, queryLens) {
+function drawMultiRequestMaskFace(group, x, y, w, h, seqLens, queryLens, window) {
     const sqLens = queryLens || seqLens;
     const totalS = seqLens.reduce((a, b) => a + b, 0);
     const totalSq = sqLens.reduce((a, b) => a + b, 0);
@@ -560,12 +584,10 @@ function drawMultiRequestMaskFace(group, x, y, w, h, seqLens, queryLens) {
             .attr('width', bw).attr('height', bh)
             .attr('fill', blocked).attr('fill-opacity', 0.5);
 
-        // Causal attend triangle/trapezoid
+        // Causal attend trapezoid (or sliding-window band)
         const diagX = bx + ((qOff + 1) / ns) * bw;
         group.append('polygon')
-            .attr('points', polyStr([
-                [bx, by], [bx, by + bh], [bx + bw, by + bh], [diagX, by]
-            ]))
+            .attr('points', polyStr(attendBandPoints(bx, by, bw, bh, nq, ns, qOff, window)))
             .attr('fill', color).attr('fill-opacity', 0.85);
 
         // Diagonal line
@@ -601,7 +623,7 @@ function drawMultiRequestMaskFace(group, x, y, w, h, seqLens, queryLens) {
 
 // --- Paged/variable-length mask face (preserved for future use) ---
 
-function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens) {
+function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens, window) {
     const sqLens = queryLens || seqLens;
     const totalS = seqLens.reduce((a, b) => a + b, 0);
     const totalSq = sqLens.reduce((a, b) => a + b, 0);
@@ -631,7 +653,9 @@ function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens) {
                         fill = crossSeq;
                         opacity = 0.8;
                     } else {
-                        const allowed = j <= (sLen - qLen + i);
+                        const qkOff = sLen - qLen;
+                        const allowed = j <= qkOff + i &&
+                            (!window || window >= sLen || j > qkOff + i - window);
                         fill = allowed ? color : blocked;
                         opacity = allowed ? 0.85 : 0.5;
                     }
@@ -669,14 +693,14 @@ function drawPagedMaskFace(group, x, y, w, h, seqLens, queryLens) {
             const by = y + rowOff * cellH;
             const bw = sLen * cellW;
             const bh = qLen * cellH;
-            // Causal triangle within block
+            const qOff = sLen - qLen;
+            // Masked background within block, then causal/window attend region
             group.append('polygon')
-                .attr('points', polyStr([[bx, by], [bx, by + bh], [bx + bw, by + bh]]))
-                .attr('fill', color).attr('fill-opacity', 0.85);
-            // Upper triangle
-            group.append('polygon')
-                .attr('points', polyStr([[bx, by], [bx + bw, by], [bx + bw, by + bh]]))
+                .attr('points', polyStr([[bx, by], [bx + bw, by], [bx + bw, by + bh], [bx, by + bh]]))
                 .attr('fill', blocked).attr('fill-opacity', 0.5);
+            group.append('polygon')
+                .attr('points', polyStr(attendBandPoints(bx, by, bw, bh, qLen, sLen, qOff, window)))
+                .attr('fill', color).attr('fill-opacity', 0.85);
             group.append('line')
                 .attr('x1', bx).attr('y1', by)
                 .attr('x2', bx + bw).attr('y2', by + bh)

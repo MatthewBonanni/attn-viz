@@ -15,6 +15,15 @@ export function drawPagedCacheDetail(svg, tensor, params) {
     const totalBlocks = blocksPerSeq.reduce((a, b) => a + b, 0);
     const pad = 20;
 
+    // Sliding-window eviction: blocks lying entirely before the active window
+    // [S-W, S-1] can be freed — only the window's worth of blocks stays resident.
+    const swaActive = !!params.slidingWindow;
+    const swaW = params.window_size;
+    const evictedFor = s => (swaActive && swaW < s) ? Math.max(0, Math.floor((s - swaW) / bs)) : 0;
+    const evictedPerSeq = sLens.map(evictedFor);
+    const liveBlocksPerSeq = blocksPerSeq.map((nb, i) => nb - evictedPerSeq[i]);
+    const totalLiveBlocks = liveBlocksPerSeq.reduce((a, b) => a + b, 0);
+
     // Per-token dims from tensor annotation
     const perTokenDims = tensor.pagedBlockDims || ['n_h', 'd_h'];
     const perTokenShape = tensor.pagedBlockShape || [];
@@ -347,12 +356,22 @@ export function drawPagedCacheDetail(svg, tensor, params) {
 
         // --- Section 2: Full block table for selected request ---
         const nBlocks = blocksPerSeq[si];
+        const nEvicted = evictedPerSeq[si];
 
         g.append('text')
             .attr('x', 0).attr('y', y)
             .attr('fill', '#bbb').attr('font-size', '11px').attr('font-weight', '600')
-            .text(`Block table — Req ${si} (${nBlocks} blocks)`);
+            .text(nEvicted > 0
+                ? `Block table — Req ${si} (${liveBlocksPerSeq[si]} live / ${nBlocks} blocks)`
+                : `Block table — Req ${si} (${nBlocks} blocks)`);
         y += 16;
+        if (swaActive && swaW < s) {
+            g.append('text')
+                .attr('x', 0).attr('y', y - 3)
+                .attr('fill', '#e67e22').attr('font-size', '9px').attr('font-style', 'italic')
+                .text(`Sliding window W=${swaW}: only blocks covering the last ${swaW} keys stay resident; older blocks are evicted.`);
+            y += 12;
+        }
 
         const blockW = Math.min(54, Math.max(30, (availW - 20) / Math.max(nBlocks, 1)));
         const blockH = 40;
@@ -374,6 +393,31 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             const newInBlock = tokensInBlock - cachedInBlock;
             const cachedFrac = cachedInBlock / bs;
             const newFrac = newInBlock / bs;
+            const isEvicted = bi < nEvicted;
+
+            // Evicted block — freed slot, drawn dim/dashed with no contents
+            if (isEvicted) {
+                g.append('rect')
+                    .attr('x', bx).attr('y', by)
+                    .attr('width', blockW).attr('height', blockH)
+                    .attr('fill', '#15171f')
+                    .attr('stroke', '#444').attr('stroke-width', 1)
+                    .attr('stroke-dasharray', '3,2')
+                    .attr('rx', 3);
+                if (blockW >= 22) {
+                    g.append('text')
+                        .attr('x', bx + blockW / 2).attr('y', by + blockH / 2 - 1)
+                        .attr('text-anchor', 'middle')
+                        .attr('fill', '#666').attr('font-size', '9px')
+                        .text('evicted');
+                    g.append('text')
+                        .attr('x', bx + blockW / 2).attr('y', by + blockH / 2 + 10)
+                        .attr('text-anchor', 'middle')
+                        .attr('fill', '#555').attr('font-size', '9px')
+                        .text(`blk ${bi}`);
+                }
+                continue;
+            }
 
             // Block background
             g.append('rect')
@@ -433,6 +477,13 @@ export function drawPagedCacheDetail(svg, tensor, params) {
             .attr('stroke', '#fff').attr('stroke-width', 0.5).attr('stroke-dasharray', '2,1');
         g.append('text').attr('x', 154).attr('y', legY + 8)
             .attr('fill', '#aaa').attr('font-size', '9px').text(`New S_q=${sq} tokens`);
+        if (nEvicted > 0) {
+            g.append('rect').attr('x', 280).attr('y', legY).attr('width', 10).attr('height', 10)
+                .attr('fill', '#15171f').attr('rx', 1)
+                .attr('stroke', '#444').attr('stroke-width', 1).attr('stroke-dasharray', '3,2');
+            g.append('text').attr('x', 294).attr('y', legY + 8)
+                .attr('fill', '#aaa').attr('font-size', '9px').text(`Evicted (${nEvicted} block${nEvicted !== 1 ? 's' : ''})`);
+        }
         y += 18;
 
         // --- Section 3: Logical blocks per DP rank ---
@@ -467,10 +518,11 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 y += 16;
             }
 
-            // Collect blocks for this rank's requests
+            // Collect blocks for this rank's requests — evicted blocks have freed
+            // their physical slots, so only live blocks remain resident.
             const rankBlocks = [];
             for (const ri of rankReqs) {
-                for (let bi = 0; bi < blocksPerSeq[ri]; bi++) {
+                for (let bi = evictedPerSeq[ri]; bi < blocksPerSeq[ri]; bi++) {
                     rankBlocks.push({
                         seq: ri, block: bi,
                         tokens: Math.min(bs, sLens[ri] - bi * bs),
@@ -533,15 +585,25 @@ export function drawPagedCacheDetail(svg, tensor, params) {
                 for (let r = 0; r < B; r++) {
                     if (Math.floor(r * dp / B) === rank) rankReqs.push(r);
                 }
-                const rankBlocks = rankReqs.reduce((sum, ri) => sum + blocksPerSeq[ri], 0);
+                const rankBlocks = rankReqs.reduce((sum, ri) => sum + liveBlocksPerSeq[ri], 0);
                 const rankColor = RANK_COLORS[rank % RANK_COLORS.length];
                 g.append('text').attr('x', 0).attr('y', y).attr('fill', rankColor).attr('font-size', '10px')
-                    .text(`DP Rank ${rank}: ${rankBlocks} blocks, ${fmtBytes(rankBlocks * blockBytes)}`);
+                    .text(`DP Rank ${rank}: ${rankBlocks} resident blocks, ${fmtBytes(rankBlocks * blockBytes)}`);
                 y += 14;
             }
         }
-        g.append('text').attr('x', 0).attr('y', y).attr('fill', '#777').attr('font-size', '10px')
-            .text(`Total: ${totalBlocks} blocks (${blocksPerSeq.join(' + ')}), ${fmtBytes(totalBlocks * blockBytes)}`);
+        if (totalLiveBlocks < totalBlocks) {
+            const liveBreakdown = B > 1 ? ` (${liveBlocksPerSeq.join(' + ')})` : '';
+            g.append('text').attr('x', 0).attr('y', y).attr('fill', '#777').attr('font-size', '10px')
+                .text(`Resident: ${totalLiveBlocks} live blocks${liveBreakdown}, ${fmtBytes(totalLiveBlocks * blockBytes)}`);
+            y += 14;
+            const saved = totalBlocks - totalLiveBlocks;
+            g.append('text').attr('x', 0).attr('y', y).attr('fill', '#2ecc71').attr('font-size', '10px')
+                .text(`Evicted: ${saved} block${saved !== 1 ? 's' : ''} freed (${fmtBytes(saved * blockBytes)} reclaimed vs full cache of ${fmtBytes(totalBlocks * blockBytes)})`);
+        } else {
+            g.append('text').attr('x', 0).attr('y', y).attr('fill', '#777').attr('font-size', '10px')
+                .text(`Total: ${totalBlocks} blocks (${blocksPerSeq.join(' + ')}), ${fmtBytes(totalBlocks * blockBytes)}`);
+        }
 
         svg.attr('height', y + 20);
     }

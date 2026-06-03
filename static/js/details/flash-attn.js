@@ -602,7 +602,9 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     }
 
     // Check if Q block [qStart, qEnd] has ANY valid attention to KV block [kvStart, kvEnd]
-    // under block-diagonal causal mask
+    // under the block-diagonal causal mask (plus the sliding window, when active).
+    const swaActive = !!params.slidingWindow;
+    const swaW = params.window_size;
     function isCausallyReachable(qStart, qEnd, kvStart, kvEnd) {
         for (let r = 0; r < queryLens.length; r++) {
             const rqS = cumSq[r], rqE = cumSq[r + 1] - 1;
@@ -611,13 +613,22 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
             if (qEnd < rqS || qStart > rqE) continue;
             // KV block must overlap this request's key range
             if (kvEnd < rkS || kvStart > rkE) continue;
-            // Causal check within this request
-            const maxQ = Math.min(qEnd, rqE);
-            const localQ = maxQ - rqS;
             const kvOffset = seqLens[r] - queryLens[r];
-            const maxReachableK = rkS + kvOffset + localQ;
-            const minK = Math.max(kvStart, rkS);
-            if (minK <= maxReachableK) return true;
+            // Local query indices (within this request) covered by the Q block
+            const loQ = Math.max(qStart, rqS) - rqS;
+            const hiQ = Math.min(qEnd, rqE) - rqS;
+            // Causal upper bound: highest key the block's last query can attend
+            const maxReachableK = rkS + kvOffset + hiQ;
+            // KV indices (global) covered by the KV block within this request
+            const kvLo = Math.max(kvStart, rkS);
+            const kvHi = Math.min(kvEnd, rkE);
+            if (kvLo > maxReachableK) continue; // entirely in the future
+            // Window lower bound: lowest key the block's first query can attend
+            if (swaActive && swaW < seqLens[r]) {
+                const minReachableK = rkS + kvOffset + loQ - swaW + 1;
+                if (kvHi < minReachableK) continue; // entirely before the window
+            }
+            return true;
         }
         return false;
     }
@@ -756,7 +767,7 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
     const legendG = sectionG.append('g').attr('transform', `translate(${gridX}, ${legendY})`);
     legendG.append('rect').attr('width', 8).attr('height', 8).attr('fill', '#1a1d2a').attr('stroke', '#2a2d3a').attr('rx', 1);
     legendG.append('text').attr('x', 12).attr('y', 7).attr('fill', '#666').attr('font-size', '11px')
-        .text('Skipped (causal mask)');
+        .text(swaActive ? 'Skipped (causal + window mask)' : 'Skipped (causal mask)');
 
     const qRange = `[${selectedQ * Br}..${Math.min((selectedQ + 1) * Br, S_q) - 1}]`;
     const kvRange = `[${selectedKV * Bc}..${Math.min((selectedKV + 1) * Bc, S) - 1}]`;
