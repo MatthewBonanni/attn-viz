@@ -1074,6 +1074,7 @@ function opColor(type) {
         compress: '#e67e22', decompress: '#e67e22',
         rope: '#ff7043', add: '#3498db',
         cache: '#16a085', flash_attn: '#ff6b6b',
+        topk: '#f1c40f', gather: '#16a085', relu_wsum: '#f39c12',
     };
     return colors[type] || '#95a5a6';
 }
@@ -1085,11 +1086,23 @@ function opSymbol(type) {
         compress: '↓', decompress: '↑',
         rope: '⟳', add: '+',
         cache: '⤓', flash_attn: '\u26A1',
+        topk: '⊤', gather: '⤵', relu_wsum: 'Σ',
     };
     return symbols[type] || '?';
 }
 
 // --- Draw arrows (with routing to avoid tensor overlap) ---
+
+// Outgoing-arrow anchor: midpoint of the back-right vertical edge of the block
+// (right edge of the back face). For deep blocks this edge sits up-and-right of
+// the front face by the depth offset — anchoring at front-face mid-height would
+// leave the arrow visually detached from the box.
+function arrowStartPoint(t) {
+    const { w, h, d } = tensorGeometry(t.shape);
+    const x = t._layoutX || 0, y = t._layoutY || 0;
+    const off = depthOffset(d);
+    return { x: x + w + off.dx, y: y + h / 2 + off.dy };
+}
 
 export function drawArrows(g, graph) {
     const tensorMap = {};
@@ -1101,10 +1114,9 @@ export function drawArrows(g, graph) {
         for (let idx = 0; idx < op.inputs.length; idx++) {
             const t = tensorMap[op.inputs[idx]];
             if (!t || t._layoutX == null) continue;
-            const bounds = tensorBounds(t.shape);
-            const geo = tensorGeometry(t.shape);
-            const sx = t._layoutX + bounds.totalW + ARROW_MARGIN;
-            const sy = t._layoutY + geo.h / 2;
+            const start = arrowStartPoint(t);
+            const sx = start.x + ARROW_MARGIN;
+            const sy = start.y;
 
             // Offset multiple arrows entering an op so arrowheads don't overlap
             const yOff = validInputs.length > 1 ? (idx - (validInputs.length - 1) / 2) * 8 : 0;

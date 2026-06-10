@@ -8,6 +8,8 @@ import { drawPagedCacheDetail } from './cache.js';
 import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
 import { drawFlashAttnDetail } from './flash-attn.js';
+import { drawTopkDetail } from './topk.js';
+import { drawSoftmaxOpDetail } from './softmax.js';
 import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
 
 // Track currently displayed detail for live refresh
@@ -85,7 +87,10 @@ function _renderOpDetail(op, graph, params) {
         for (const item of cost.breakdown) {
             if (item.bytes > 0) {
                 const shapeStr = item.shape ? ` [${item.shape.join('×')}]` : '';
-                descHtml += `<div><span style="color:#888">${item.label}:</span> <span style="color:#aaa">${fmtBytes(item.bytes)}</span><span style="color:#555;font-size:10px">${shapeStr} × 2B</span></div>`;
+                // Derive bytes/element from the breakdown itself (fp8=1, bf16=2, int32=4, mask=1)
+                const perEl = item.shape ? item.bytes / tensorElements(item.shape) : 0;
+                const perElStr = item.shape && perEl > 0 ? ` × ${perEl}B` : '';
+                descHtml += `<div><span style="color:#888">${item.label}:</span> <span style="color:#aaa">${fmtBytes(item.bytes)}</span><span style="color:#555;font-size:10px">${shapeStr}${perElStr}</span></div>`;
             }
         }
 
@@ -125,6 +130,12 @@ function _renderOpDetail(op, graph, params) {
         case 'rope':
             drawRopeDetail(svg, op, tensorMap, params);
             break;
+        case 'topk':
+            drawTopkDetail(svg, op, tensorMap, params);
+            break;
+        case 'softmax':
+            drawSoftmaxOpDetail(svg, op, tensorMap, params);
+            break;
         default:
             drawGenericDetail(svg, op, tensorMap);
     }
@@ -151,13 +162,14 @@ function _renderTensorDetail(tensor, params) {
         descHtml += ' This mask is never explicitly materialized as a full S\u00d7S matrix in HBM \u2014 it is applied on-the-fly (or fused into the FlashAttention kernel).';
     }
     const elems = tensorElements(tensor.shape);
-    const bytes = tensorBytes(tensor.shape);
+    const bytes = tensorBytes(tensor.shape, tensor.bytesPerEl);
+    const dtypeLabel = { 1: 'fp8', 2: 'bf16', 4: 'int32' }[tensor.bytesPerEl || 2] || `${tensor.bytesPerEl}B/el`;
     const shapeStr = tensor.shape.join(' × ');
     descHtml += `<div style="margin-top:12px;padding:10px 12px;background:#1a1d2a;border-radius:6px;border:1px solid #2a2d3a;font-size:11px;line-height:1.8">`;
     descHtml += `<div style="font-weight:600;color:#bbb;margin-bottom:4px;font-size:12px">Size</div>`;
     descHtml += `<div><span style="color:#888">Shape:</span> <span style="color:#7c8cf8">[${shapeStr}]</span></div>`;
     descHtml += `<div><span style="color:#888">Elements:</span> <span style="color:#aaa">${elems.toLocaleString()}</span> <span style="color:#555;font-size:10px">(${fmtNum(elems)})</span></div>`;
-    descHtml += `<div><span style="color:#888">Size (bf16):</span> <span style="color:#aaa">${fmtBytes(bytes)}</span></div>`;
+    descHtml += `<div><span style="color:#888">Size (${dtypeLabel}):</span> <span style="color:#aaa">${fmtBytes(bytes)}</span></div>`;
     descHtml += `</div>`;
     d3.select('#detail-desc').html(descHtml);
 

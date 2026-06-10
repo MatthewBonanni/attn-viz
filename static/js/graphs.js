@@ -7,6 +7,7 @@ export const VARIANT_DESCS = {
     gqa: `<b>Grouped-Query Attention</b> (Ainslie et al., 2023) — A middle ground between MHA and MQA. Uses n_kv KV-head groups, where each group is shared by n_h/n_kv query heads. Reduces KV cache by n_h/n_kv× while retaining most of MHA's quality. Used in Llama 2/3, Mistral, Gemma, Qwen.`,
     mqa: `<b>Multi-Query Attention</b> (Shazeer, 2019) — All n_h query heads share a single K and V head. Reduces KV cache to O(2 · d_h · S) per layer — an n_h× reduction vs MHA. Trades some quality for dramatically faster inference. Used in PaLM, Falcon, StarCoder.`,
     mla: `<b>Multi-Head Latent Attention</b> (DeepSeek-V2, 2024) — Compresses KV representations via a low-rank bottleneck. Instead of caching full K, V tensors (size n_h · d_h per token), caches a compressed latent c_kv of size d_c ≪ n_h · d_h. During inference, the <b>up-projected</b> path is used for compute-bound <em>prefills</em>, while the <b>absorbed</b> path is used for memory-bandwidth-bound <em>decodes</em>. Both are shown below.`,
+    dsa: `<b>DeepSeek Sparse Attention</b> (DeepSeek-V3.2, 2025) — MLA plus a learned <b>lightning indexer</b>: a small FP8 scorer (n_i heads of d_i dims, MQA-style shared key) that rates every cached token per query, then keeps only the <b>top-k</b> (k=2048). Core attention runs in MLA's absorbed (MQA-style) form over just those k tokens — for both prefill and decode — cutting attention cost from O(S) to O(k) per query at long context.`,
 };
 
 // Dim label helpers: when B > 1, S_q/S labels become ΣS_q/ΣS
@@ -603,6 +604,206 @@ export function mlaAbsorbedGraph(p) {
               tensors: ['c_ctx','W_UV','ctx_head','ctx','W_O','out'],
               ops: ['decomp_ctx','view_out','out_proj'],
               desc: `Latent context c_ctx is decompressed via W↑v (d_c=${d_c} → d_h=${d_h}) once per query position — not per cached token. Then merged across heads and projected through Wo back to model dimension D.` },
+        ]
+    };
+}
+
+// --- DSA (DeepSeek Sparse Attention, V3.2-style top-k) ---
+
+export function dsaGraph(p) {
+    const { n_h, d_h, d_c, d_r, B } = p;
+    const d_q = p.d_q || d_c;   // Q latent dim (Lq); distinct from KV latent dim (Lkv = d_c)
+    const n_i = p.n_i || 64;    // indexer heads
+    const d_i = p.d_i || 128;   // indexer head dim
+    const topk = p.topk || 2048;
+    const S_q = p.sumSq || p.S_q || p.S;
+    const S   = p.sumS  || p.S;
+    const D = n_h * d_h;
+    const dr = d_r || 64;
+    const lq = sqLabel(B), ls = sLabel(B);
+
+    // Effective k: each query attends to min(topk, S_i) tokens. With B > 1 this
+    // varies per request, so use the query-weighted mean so volumes stay exact.
+    let k;
+    if (B > 1 && p.queryLens && p.seqLens) {
+        const sq = p.queryLens.slice(0, B), s = p.seqLens.slice(0, B);
+        const totQ = sq.reduce((a, b) => a + b, 0);
+        k = Math.round(sq.reduce((acc, q, i) => acc + q * Math.min(topk, s[i]), 0) / Math.max(1, totQ));
+    } else {
+        k = Math.min(topk, p.S);
+    }
+    const dense = k >= S;
+    const denseNote = dense
+        ? ` Here k ≥ S, so every causal position is selected — dense fallback (no savings until S > topk).`
+        : ``;
+    const kNote = B > 1 ? ` (query-weighted mean of per-request min(topk, S_i))` : ``;
+
+    return {
+        id: 'dsa', label: 'DeepSeek Sparse Attention (DSA)',
+        tensors: [
+            { id: 'X',        shape: [S_q, D],           label: 'X',        stage: 0, row: 1, color: '#4a90d9', dimNames: [lq,'D'],
+              desc: 'Input activation tensor.' },
+            // Compression (identical to absorbed MLA)
+            { id: 'W_DQ',     shape: [D, d_q],             label: 'W↓q',     stage: 1, row: 0, color: '#7b68ee', dimNames: ['D','d_q'], type: 'weight',
+              desc: `Query down-projection: D=${D} → d_q=${d_q}.` },
+            { id: 'W_DKV',    shape: [D, d_c],             label: 'W↓kv',    stage: 1, row: 1, color: '#7b68ee', dimNames: ['D','d_c'], type: 'weight',
+              desc: `KV down-projection: D=${D} → d_c=${d_c}.` },
+            { id: 'W_KR',     shape: [D, dr],               label: 'W_kr',    stage: 1, row: 2, color: '#7b68ee', dimNames: ['D','d_r'], type: 'weight',
+              desc: `RoPE key projection: D=${D} → d_r=${dr}. Decoupled from KV compression because RoPE doesn't commute with low-rank compression.` },
+            { id: 'c_Q',       shape: [S_q, d_q],         label: 'c_q',     stage: 2, row: 0, color: '#c0392b', dimNames: [lq,'d_q'],
+              desc: `Compressed query latent. d_q=${d_q}. Feeds both the absorbed attention path and the lightning indexer.` },
+            { id: 'c_KV_new',  shape: [S_q, d_c],         label: 'c_kv_new', stage: 2, row: 1, color: '#e67e22', dimNames: [lq,'d_c'],
+              desc: `Newly compressed KV latent for S_q tokens.` },
+            { id: 'k_rp_new',  shape: [S_q, dr],          label: 'k_r_new', stage: 2, row: 2, color: '#ff7043', dimNames: [lq,'d_r'],
+              desc: `Newly projected pre-RoPE key embedding for S_q tokens.` },
+            { id: 'k_r_new',   shape: [S_q, dr],          label: "k_r_new'", stage: 3, row: 2, color: '#ff7043', dimNames: [lq,'d_r'],
+              desc: `RoPE applied to new decoupled keys before caching.` },
+            // Absorbed weights (identical to absorbed MLA)
+            { id: 'W_QR',     shape: [n_h, d_q, dr],        label: 'W_qr',    stage: 4, row: 0, color: '#7b68ee', dimNames: ['n_h','d_q','d_r'], type: 'weight', badge: 'ABSORBED',
+              desc: `Absorbed RoPE query weight: extracts the RoPE query component from c_q, per head. Shape [d_q, d_r] = [${d_q}, ${dr}] per head.` },
+            { id: 'W_QK',     shape: [n_h, d_q, d_c],      label: 'W_QK',    stage: 4, row: 1, color: '#7b68ee', dimNames: ['n_h','d_q','d_c'], type: 'weight', badge: 'ABSORBED',
+              desc: `Absorbed QK content weight: W_QK_h = W_UQ_h @ W_UK_h^T per head, shape [d_q, d_c] = [${d_q}, ${d_c}]. Maps query latent to KV latent space for content-based attention.` },
+            { id: 'c_KV',     shape: [S, d_c],           label: 'c_kv',    stage: 4, row: 4, color: '#e67e22', dimNames: [ls,'d_c'], cache: true,
+              desc: `Full compressed KV cache: new latents appended → S total. Cache per token = d_c + d_r + d_i (FP8 indexer key) = ${d_c}·2B + ${dr}·2B + ${d_i}·1B.` },
+            { id: 'k_r',      shape: [S, dr],            label: "k_r'",    stage: 4, row: 5, color: '#ff7043', dimNames: [ls,'d_r'], cache: true,
+              desc: `Full RoPE key cache: new RoPE'd keys appended → S total. Provides positional information that c_kv cannot carry.` },
+            // Projected queries (identical to absorbed MLA, stages 6-7)
+            { id: 'q_rp',     shape: [n_h, S_q, dr],     label: 'q_r',     stage: 6, row: 0, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
+              desc: `Pre-RoPE query component: c_q @ W_qr per head → [n_h, S_q, d_r=${dr}].` },
+            { id: 'q_r',      shape: [n_h, S_q, dr],     label: "q_r'",    stage: 7, row: 0, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
+              desc: `RoPE query — after applying rotary position embedding to q_r.` },
+            { id: 'q_lat',    shape: [n_h, S_q, d_c],    label: "q'",      stage: 7, row: 1, color: '#e74c3c', dimNames: ['n_h',lq,'d_c'],
+              desc: `Absorbed content query: c_q @ W_QK per head → [n_h, S_q, d_c=${d_c}].` },
+            // --- Lightning indexer (rows 6-8) ---
+            { id: 'W_KI',     shape: [D, d_i],             label: 'W_kI',    stage: 1, row: 7, color: '#7b68ee', dimNames: ['D','d_i'], type: 'weight',
+              desc: `Indexer key projection: D=${D} → d_i=${d_i}. A single shared indexer key per token (MQA-style — no head dimension). In vLLM this is fused with W_w into one GEMM, with a LayerNorm on the output.` },
+            { id: 'W_W',      shape: [D, n_i],             label: 'W_w',     stage: 1, row: 8, color: '#7b68ee', dimNames: ['D','n_i'], type: 'weight',
+              desc: `Indexer head-weight projection: D=${D} → n_i=${n_i}. Produces per-token weights that say how much each indexer head's opinion counts.` },
+            { id: 'k_I_new',  shape: [S_q, d_i],         label: 'k_I_new', stage: 2, row: 7, color: '#2ecc71', dimNames: [lq,'d_i'],
+              desc: `New indexer keys for S_q tokens: X @ W_kI → [S_q, ${d_i}]. One shared key per token — all n_i indexer heads score against the same key (MQA-style).` },
+            { id: 'w_I',      shape: [S_q, n_i],         label: 'w',       stage: 2, row: 8, color: '#f1c40f', dimNames: [lq,'n_i'],
+              desc: `Per-token indexer head weights: X @ W_w → [S_q, ${n_i}]. Weight w[t,h] scales head h's contribution to query t's index scores.` },
+            { id: 'k_I_r',    shape: [S_q, d_i],         label: "k_I'",    stage: 3, row: 7, color: '#2ecc71', dimNames: [lq,'d_i'], bytesPerEl: 1, badge: 'FP8',
+              desc: `Indexer keys after partial RoPE (first ${dr} dims rotated) and FP8 quantization. FP8 is what makes the indexer "lightning" — half the bytes of BF16.` },
+            { id: 'W_QI',     shape: [d_q, n_i * d_i],     label: 'W_qI',    stage: 4, row: 6, color: '#7b68ee', dimNames: ['d_q','n_i·d_i'], type: 'weight',
+              desc: `Indexer query projection: d_q=${d_q} → n_i·d_i=${n_i * d_i}. Projects the compressed query latent c_q into ${n_i} small indexer heads.` },
+            { id: 'k_I',      shape: [S, d_i],           label: 'k_I',     stage: 4, row: 7, color: '#2ecc71', dimNames: [ls,'d_i'], cache: true, bytesPerEl: 1, badge: 'FP8',
+              desc: `Indexer key cache (FP8): new indexer keys appended → S total. Adds only d_i=${d_i} bytes per token on top of the MLA cache.` },
+            { id: 'q_I_pre',  shape: [n_i, S_q, d_i],    label: 'q_I',     stage: 6, row: 6, color: '#e74c3c', dimNames: ['n_i',lq,'d_i'],
+              desc: `Indexer queries: c_q @ W_qI → [S_q, ${n_i * d_i}], viewed as [n_i, S_q, d_i]. ${n_i} small heads of ${d_i} dims each.` },
+            { id: 'q_I',      shape: [n_i, S_q, d_i],    label: "q_I'",    stage: 7, row: 6, color: '#e74c3c', dimNames: ['n_i',lq,'d_i'], bytesPerEl: 1, badge: 'FP8',
+              desc: `Indexer queries after partial RoPE (first ${dr} dims) and FP8 quantization.` },
+            { id: 'idx_scores', shape: [n_i, S_q, S],    label: 'q_I·k_Iᵀ', stage: 9, row: 6, color: '#9b59b6', dimNames: ['n_i',lq,ls],
+              desc: `Per-head index scores: q_I' @ k_I^T → [n_i, S_q, S]. k_I is broadcast across all ${n_i} indexer heads (MQA-style). FP8 inputs make this GEMM cheap despite being dense over all S positions.` },
+            { id: 'logits',   shape: [S_q, S],           label: 'I',       stage: 10, row: 6, color: '#9b59b6', dimNames: [lq,ls],
+              desc: `Index scores: I[t,s] = Σ_h w[t,h] · ReLU(q_I'[t,h]·k_I[s]). One relevance score per (query, cached token) pair — the indexer's judgment of which context matters for each query.` },
+            { id: 'mask',     shape: [S_q, S],               label: 'Mask',    stage: 10, row: 7, color: '#1abc9c', dimNames: [lq,ls], type: 'mask',
+              desc: 'Causal mask, applied to the index scores: a query may only select positions ≤ its own. Causality is enforced HERE, at selection — core attention needs no mask.' },
+            { id: 'topk_idx', shape: [S_q, k],           label: 'top-k idx', stage: 11, row: 6, color: '#f1c40f', dimNames: [lq,'k'], bytesPerEl: 4, badge: 'INT32',
+              desc: `Selected token indices: for each query, the k=${k} highest-scoring causal positions${kNote}. int32 indices, not values — this is all that flows to core attention.${denseNote}` },
+            { id: 'c_kv_sel', shape: [S_q, k, d_c],      label: 'c_kv_sel', stage: 12, row: 4, color: '#e67e22', dimNames: [lq,'k','d_c'], sramOnly: true, badge: 'GATHERED',
+              desc: `Per-query gathered KV latents: each query's k=${k} selected rows of c_kv. Never materialized in HBM — the sparse kernel gathers tiles directly into SRAM (gather op accounts the HBM reads).` },
+            { id: 'k_r_sel',  shape: [S_q, k, dr],       label: 'k_r_sel', stage: 12, row: 5, color: '#ff7043', dimNames: [lq,'k','d_r'], sramOnly: true, badge: 'GATHERED',
+              desc: `Per-query gathered RoPE keys: each query's k=${k} selected rows of k_r'. Gathered into SRAM alongside c_kv_sel.` },
+            // Sparse core attention — over k selected tokens, not S
+            { id: 's_content', shape: [n_h, S_q, k],     label: "q'c_kvᵀ", stage: 14, row: 1, color: '#9b59b6', dimNames: ['n_h',lq,'k'],
+              desc: `Content attention scores over the k=${k} selected tokens only: q' @ c_kv_sel^T. Width k instead of S — this is where DSA's savings land.` },
+            { id: 's_rope',   shape: [n_h, S_q, k],      label: "q_r'k_r'ᵀ", stage: 14, row: 2, color: '#9b59b6', dimNames: ['n_h',lq,'k'],
+              desc: `RoPE attention scores over the selected tokens: q_r' @ k_r_sel^T.` },
+            { id: 'scores',   shape: [n_h, S_q, k],      label: 'Scores',  stage: 15, row: 1, color: '#9b59b6', dimNames: ['n_h',lq,'k'],
+              desc: `Combined scores = content + positional, over k=${k} selected tokens. Equivalent to MQA with QK headdim = d_c + d_r = ${d_c + dr}, but only ${k} columns instead of ${S}.` },
+            { id: 'attn',     shape: [n_h, S_q, k],      label: 'Attn',    stage: 16, row: 1, color: '#9b59b6', dimNames: ['n_h',lq,'k'],
+              desc: 'Attention weights after softmax. No causal mask needed — the top-k selection already excluded future positions.' },
+            { id: 'c_ctx',    shape: [n_h, S_q, d_c],    label: 'c_ctx',   stage: 18, row: 1, color: '#e67e22', dimNames: ['n_h',lq,'d_c'], badge: 'LATENT',
+              desc: `Latent context: Attn @ c_kv_sel. Attention-weighted sum of the selected compressed values — still in d_c=${d_c} latent space.` },
+            { id: 'W_UV',     shape: [d_c, d_h],            label: 'W↑v',     stage: 18, row: 2, color: '#7b68ee', dimNames: ['d_c','d_h'], type: 'weight',
+              desc: `Value up-projection (per head): d_c=${d_c} → d_h=${d_h}. Applied once per query position — not per cached token.` },
+            { id: 'ctx_head', shape: [n_h, S_q, d_h],    label: 'AV_head', stage: 19, row: 1, color: '#e67e22', dimNames: ['n_h',lq,'d_h'],
+              desc: `Per-head decompressed context: c_ctx @ W↑v → [n_h, S_q, d_h].` },
+            { id: 'ctx',      shape: [S_q, D],            label: 'Ctx',     stage: 20, row: 1, color: '#e67e22', dimNames: [lq,'D'],
+              desc: 'Context vectors merged across heads via view.' },
+            { id: 'W_O',      shape: [D, D],                label: 'Wo',      stage: 20, row: 2, color: '#7b68ee', dimNames: ['D','D'], type: 'weight',
+              desc: 'Output projection.' },
+            { id: 'out',      shape: [S_q, D],            label: 'Out',     stage: 21, row: 1, color: '#3498db', dimNames: [lq,'D'],
+              desc: 'Attention output.' },
+        ],
+        ops: [
+            { id: 'compress_q',    type: 'compress',   inputs: ['X','W_DQ'],          output: 'c_Q',      label: 'Down-proj',
+              desc: `Compress queries: X @ W↓q → c_q [S_q, ${d_q}].` },
+            { id: 'compress_kv',   type: 'compress',   inputs: ['X','W_DKV'],         output: 'c_KV_new', label: 'Down-proj',
+              desc: `Compress KV for S_q new tokens: X @ W↓kv → c_kv_new [S_q, ${d_c}].` },
+            { id: 'rope_k_proj',   type: 'matmul',     inputs: ['X','W_KR'],          output: 'k_rp_new', label: 'Linear',
+              desc: `Project S_q new tokens to decoupled RoPE key space: X @ W_kr → k_r_new [S_q, ${dr}].` },
+            { id: 'rope_k',        type: 'rope',       inputs: ['k_rp_new'],          output: 'k_r_new',  label: 'RoPE',
+              desc: `Apply RoPE to new decoupled keys before caching.` },
+            { id: 'cache_kv',      type: 'cache',      inputs: ['c_KV_new'],          output: 'c_KV',     label: 'KV Cache', alignX: 'kv_cache',
+              desc: `Append new compressed KV latents to the cache → [S, ${d_c}].` },
+            { id: 'cache_kr',      type: 'cache',      inputs: ['k_r_new'],           output: 'k_r',      label: 'KV Cache', alignX: 'kv_cache',
+              desc: `Append new RoPE'd keys to the cache → [S, ${dr}].` },
+            { id: 'absorbed_proj', type: 'matmul',     inputs: ['c_Q','W_QK'],        output: 'q_lat',    label: 'Absorbed proj',
+              desc: `Content query in latent space: c_q @ W_QK per head → q' [n_h, S_q, d_c=${d_c}].` },
+            { id: 'rope_q_proj',   type: 'matmul',     inputs: ['c_Q','W_QR'],        output: 'q_rp',     label: 'Linear',
+              desc: `Project c_q to RoPE query space per head: c_q @ W_qr → q_r [n_h, S_q, ${dr}].` },
+            { id: 'rope_q',        type: 'rope',       inputs: ['q_rp'],              output: 'q_r',      label: 'RoPE',
+              desc: `Apply RoPE to query. Together with k_r', enables position-dependent attention scores.` },
+            // Lightning indexer
+            { id: 'idx_k_proj',    type: 'matmul',     inputs: ['X','W_KI'],          output: 'k_I_new',  label: 'Linear',
+              desc: `Project new tokens to indexer key space: X @ W_kI → [S_q, ${d_i}]. Single shared key per token (no head dim). In vLLM this GEMM is fused with the head-weight projection; a LayerNorm follows.` },
+            { id: 'idx_w_proj',    type: 'matmul',     inputs: ['X','W_W'],           output: 'w_I',      label: 'Linear',
+              desc: `Project new tokens to indexer head weights: X @ W_w → [S_q, ${n_i}].` },
+            { id: 'rope_ki',       type: 'rope',       inputs: ['k_I_new'],           output: 'k_I_r',    label: 'RoPE+FP8',
+              desc: `Partial RoPE (first ${dr} of ${d_i} dims) then FP8 quantization of indexer keys before caching.` },
+            { id: 'cache_ki',      type: 'cache',      inputs: ['k_I_r'],             output: 'k_I',      label: 'Idx Cache', alignX: 'kv_cache',
+              desc: `Append new FP8 indexer keys to the indexer cache → [S, ${d_i}]. Costs 1 byte/element — d_i=${d_i} bytes per token.` },
+            { id: 'idx_q_proj',    type: 'matmul',     inputs: ['c_Q','W_QI'],        output: 'q_I_pre',  label: 'Indexer Q',
+              desc: `Indexer queries from the query latent: c_q @ W_qI → [S_q, ${n_i * d_i}], viewed as [n_i, S_q, d_i].` },
+            { id: 'rope_qi',       type: 'rope',       inputs: ['q_I_pre'],           output: 'q_I',      label: 'RoPE+FP8',
+              desc: `Partial RoPE (first ${dr} dims) then FP8 quantization of indexer queries.` },
+            { id: 'idx_qk',        type: 'matmul',     inputs: ['q_I','k_I'],         output: 'idx_scores', label: "q_I' @ k_Iᵀ", stage: 8,
+              desc: `Index score GEMM: q_I' @ k_I^T → [n_i, S_q, S]. Dense over all S cached tokens, but cheap per position: n_i·d_i = ${n_i * d_i} MACs vs n_h·(d_c+d_r) = ${n_h * (d_c + dr)} for dense absorbed attention — ~${Math.round(n_h * (d_c + dr) / (n_i * d_i))}× fewer, and in FP8.` },
+            { id: 'relu_wsum',     type: 'relu_wsum',  inputs: ['idx_scores','w_I'],  output: 'logits',   label: 'ReLU·w Σ',
+              desc: `Combine indexer heads: I[t,s] = Σ_h w[t,h] · ReLU(score[h,t,s]). ReLU gates each head's opinion; w weights how much it counts. Output: one scalar relevance per (query, token) pair.` },
+            { id: 'topk',          type: 'topk',       inputs: ['logits','mask'],     output: 'topk_idx', label: `Top-k`,
+              desc: `Select each query's k=${k} highest-scoring causal positions (k = min(topk=${topk}, S)). Output is int32 indices only.${denseNote}` },
+            { id: 'gather_kv',     type: 'gather',     inputs: ['topk_idx','c_KV'],   output: 'c_kv_sel', label: 'Gather',
+              desc: `Gather each query's k=${k} selected c_kv rows from the cache. Reads S_q·k·d_c elements — the no-reuse upper bound; real kernels amortize reads across query tiles. Gathered tiles stay in SRAM.` },
+            { id: 'gather_kr',     type: 'gather',     inputs: ['topk_idx','k_r'],    output: 'k_r_sel',  label: 'Gather',
+              desc: `Gather each query's k=${k} selected k_r' rows from the cache into SRAM.` },
+            // Sparse core attention
+            { id: 'content_qk',   type: 'matmul',     inputs: ['q_lat','c_kv_sel'],  output: 's_content', label: "q' @ c_kvᵀ", stage: 13,
+              desc: `Content attention scores over selected tokens: q' @ c_kv_sel^T → [n_h, S_q, k]. O(k) per query instead of O(S).` },
+            { id: 'rope_qk',      type: 'matmul',     inputs: ['q_r','k_r_sel'],     output: 's_rope',   label: "q_r' @ k_r'ᵀ", stage: 13,
+              desc: `Positional attention scores over selected tokens: q_r' @ k_r_sel^T → [n_h, S_q, k].` },
+            { id: 'add_scores',   type: 'add',        inputs: ['s_content','s_rope'], output: 'scores',   label: '+',
+              desc: `Sum content and positional scores.` },
+            { id: 'softmax_op',   type: 'softmax',    inputs: ['scores'],            output: 'attn',     label: 'Softmax',
+              desc: `Row-wise softmax over the k=${k} selected positions. No causal mask — top-k selection already excluded future tokens.` },
+            { id: 'latent_attn_v',type: 'matmul',     inputs: ['attn','c_kv_sel'],   output: 'c_ctx',    label: 'Attn @ c_kv', stage: 17,
+              desc: `Latent attention: Attn @ c_kv_sel → c_ctx [n_h, S_q, d_c]. Weighted sum over only the k=${k} selected tokens, still in latent space.` },
+            { id: 'decomp_ctx',   type: 'decompress', inputs: ['c_ctx','W_UV'],      output: 'ctx_head', label: 'Up-proj V',
+              desc: `Decompress context: c_ctx @ W↑v → ctx_head [n_h, S_q, d_h]. Decompression only at the end.` },
+            { id: 'view_out',     type: 'reshape',    inputs: ['ctx_head'],          output: 'ctx',      label: 'View',
+              desc: `View heads as flat: [n_h, S_q, d_h] → [S_q, D]. Zero-cost metadata operation.` },
+            { id: 'out_proj',     type: 'matmul',     inputs: ['ctx','W_O'],         output: 'out',      label: 'Linear',
+              desc: `Output projection: [S_q, D] @ [D, D] → [S_q, D] via Wo.` },
+        ],
+        groups: [
+            { label: 'KV PROJECTION & CACHE', color: '#16a085',
+              tensors: ['W_DKV','W_KR','c_KV_new','k_rp_new','k_r_new','c_KV','k_r'],
+              ops: ['compress_kv','rope_k_proj','rope_k','cache_kv','cache_kr'],
+              desc: `Identical to absorbed MLA: X @ W↓kv → c_kv (d_c=${d_c}), plus decoupled RoPE keys k_r (d_r=${dr}). DSA adds an FP8 indexer key cache on top — total cache per token = ${d_c}+${dr} BF16 elements + ${d_i} FP8 bytes.` },
+            { label: 'LIGHTNING INDEXER', color: '#f1c40f', padTop: 40,
+              tensors: ['W_QI','W_KI','W_W','k_I_new','w_I','k_I_r','k_I','q_I_pre','q_I','idx_scores','logits','mask','topk_idx'],
+              ops: ['idx_k_proj','idx_w_proj','rope_ki','cache_ki','idx_q_proj','rope_qi','idx_qk','relu_wsum','topk'],
+              desc: `The indexer decides WHICH tokens deserve attention. ${n_i} small FP8 heads (d_i=${d_i}) score every cached token against each query — I[t,s] = Σ_h w[t,h]·ReLU(q_I·k_I) — then each query keeps its top k=${topk}. The scoring is dense over S but cheap: FP8, one shared key (MQA-style), and ~${n_i * d_i} dims total vs ${n_h}·${d_c + dr} for full attention. Replicated across TP ranks (not sharded).` },
+            { label: 'SPARSE ATTENTION', color: '#9b59b6', padTop: 40,
+              tensors: ['c_kv_sel','k_r_sel','s_content','s_rope','scores','attn'],
+              ops: ['gather_kv','gather_kr','content_qk','rope_qk','add_scores','softmax_op','latent_attn_v'],
+              desc: `Absorbed-MLA attention over only the k=${k} selected tokens — MQA-style with QK headdim d_c + d_r = ${d_c + dr}, V headdim d_c = ${d_c}, but ${dense ? 'k = S here (dense fallback)' : `k=${k} columns instead of S=${S}`}. Runs this way for BOTH prefill and decode (vLLM's FlashMLA-sparse kernel). No causal mask — selection was already causal.` },
+            { label: 'OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+              tensors: ['c_ctx','W_UV','ctx_head','ctx','W_O','out'],
+              ops: ['decomp_ctx','view_out','out_proj'],
+              desc: `Latent context c_ctx is decompressed via W↑v (d_c=${d_c} → d_h=${d_h}) once per query position, then merged across heads and projected through Wo back to model dimension D.` },
         ]
     };
 }

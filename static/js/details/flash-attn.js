@@ -790,6 +790,16 @@ function drawCTAGrid(g, x, y, width, params, S_q, S, numQBlocks, numKVBlocks,
 
     let bottomY = gridY + gridH + 38;
 
+    // Tiles too small to read/click comfortably — hint at how to get detail back
+    if (cellSize < 8) {
+        sectionG.append('text')
+            .attr('x', gridCenterX).attr('y', bottomY)
+            .attr('text-anchor', 'middle')
+            .attr('fill', '#555').attr('font-size', '9px')
+            .text('Tiles are tiny — reduce S / S_q (or increase block sizes) to explore individual tiles');
+        bottomY += 16;
+    }
+
     // DP annotation note
     if (effectiveDp > 1) {
         sectionG.append('text')

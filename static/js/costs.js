@@ -26,8 +26,8 @@ export function tensorElements(shape) {
     return shape.reduce((a, b) => a * b, 1);
 }
 
-export function tensorBytes(shape) {
-    return tensorElements(shape) * BYTES_BF16;
+export function tensorBytes(shape, bytesPerEl = BYTES_BF16) {
+    return tensorElements(shape) * bytesPerEl;
 }
 
 // Compute cost for an operation
@@ -37,8 +37,10 @@ export function computeOpCost(op, tensorMap) {
     if (!output) return null;
 
     const inputs = op.inputs.map(id => tensorMap[id]).filter(Boolean);
+    // Bytes for a tensor, honoring per-tensor dtype (e.g. FP8 indexer, int32 indices)
+    const tBytes = (t) => tensorBytes(t.shape, t.bytesPerEl);
     // SRAM-only tensors (FlashAttention) have zero HBM transfer
-    const outBytes = output.sramOnly ? 0 : tensorBytes(output.shape);
+    const outBytes = output.sramOnly ? 0 : tBytes(output);
 
     switch (op.type) {
         case 'matmul':
@@ -62,8 +64,8 @@ export function computeOpCost(op, tensorMap) {
             const batchSize = batchDims.reduce((a, b) => a * b, 1);
 
             const flops = 2 * batchSize * M * K * N;
-            const readA = A.sramOnly ? 0 : tensorBytes(shA);
-            const readB = B.sramOnly ? 0 : tensorBytes(shB);
+            const readA = A.sramOnly ? 0 : tBytes(A);
+            const readB = B.sramOnly ? 0 : tBytes(B);
             const readBytes = readA + readB;
             const writeBytes = outBytes;
 
@@ -86,7 +88,7 @@ export function computeOpCost(op, tensorMap) {
             const elements = tensorElements(output.shape);
             const flops = 5 * elements;
             // Read scores + mask, write attention weights
-            const scoreBytes = (inputs[0] && !inputs[0].sramOnly) ? tensorBytes(inputs[0].shape) : 0;
+            const scoreBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
             const maskBytes = (inputs[1] && !inputs[1].sramOnly) ? tensorElements(inputs[1].shape) * 1 : 0;
             const readBytes = scoreBytes + maskBytes;
             const writeBytes = outBytes;
@@ -110,7 +112,7 @@ export function computeOpCost(op, tensorMap) {
             // = 3 FLOPs per element (each pair covers 2 elements)
             const elements = tensorElements(output.shape);
             const flops = 3 * elements;
-            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tensorBytes(inputs[0].shape) : 0;
+            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
             const writeBytes = outBytes;
 
             return {
@@ -128,7 +130,7 @@ export function computeOpCost(op, tensorMap) {
         case 'add': {
             const elements = tensorElements(output.shape);
             const flops = elements;
-            const readBytes = inputs.reduce((sum, t) => sum + (t.sramOnly ? 0 : tensorBytes(t.shape)), 0);
+            const readBytes = inputs.reduce((sum, t) => sum + (t.sramOnly ? 0 : tBytes(t)), 0);
             const writeBytes = outBytes;
             const totalIO = readBytes + writeBytes;
 
@@ -138,7 +140,7 @@ export function computeOpCost(op, tensorMap) {
                 writeBytes,
                 arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
                 breakdown: [
-                    ...inputs.map(t => ({ label: `Read ${t.label}`, shape: t.shape, bytes: t.sramOnly ? 0 : tensorBytes(t.shape) })),
+                    ...inputs.map(t => ({ label: `Read ${t.label}`, shape: t.shape, bytes: t.sramOnly ? 0 : tBytes(t) })),
                     { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
                 ],
             };
@@ -185,7 +187,7 @@ export function computeOpCost(op, tensorMap) {
             for (const t of inputs) {
                 if (!t || t.type === 'mask' || counted.has(t.id)) continue;
                 counted.add(t.id);
-                const bytes = tensorBytes(t.shape);
+                const bytes = tBytes(t);
                 readBytes += bytes;
                 breakdown.push({ label: `Read ${t.label}`, shape: t.shape, bytes });
             }
@@ -208,8 +210,8 @@ export function computeOpCost(op, tensorMap) {
         }
 
         case 'cache': {
-            // Append to cache: copy S_q new tokens
-            const inputBytes = inputs[0] ? tensorBytes(inputs[0].shape) : 0;
+            // Append to cache: copy S_q new tokens (at the cache's dtype, e.g. FP8 indexer keys)
+            const inputBytes = inputs[0] ? tensorBytes(inputs[0].shape, output.bytesPerEl) : 0;
             return {
                 flops: 0,
                 readBytes: inputBytes,
@@ -218,6 +220,102 @@ export function computeOpCost(op, tensorMap) {
                 breakdown: [
                     { label: `Read new tokens`, shape: inputs[0]?.shape, bytes: inputBytes },
                     { label: `Write to cache`, shape: inputs[0]?.shape, bytes: inputBytes },
+                ],
+            };
+        }
+
+        case 'softmax': {
+            // Standalone row-wise softmax (no mask): exp, sum, div, max-subtract ≈ 4 FLOPs/element
+            const elements = tensorElements(output.shape);
+            const flops = 4 * elements;
+            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
+            const writeBytes = outBytes;
+            const totalIO = readBytes + writeBytes;
+
+            return {
+                flops,
+                readBytes,
+                writeBytes,
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
+                breakdown: [
+                    { label: `Read ${inputs[0]?.label || 'scores'}`, shape: inputs[0]?.shape, bytes: readBytes },
+                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
+                ],
+            };
+        }
+
+        case 'relu_wsum': {
+            // ReLU + per-head weighted sum over indexer heads:
+            // logits[t,s] = Σ_h w[t,h] · ReLU(scores[h,t,s]) → ReLU + mul + add ≈ 3 FLOPs per head-element
+            const scores = inputs[0];
+            const weights = inputs[1];
+            if (!scores) return null;
+            const flops = 3 * tensorElements(scores.shape);
+            const readScores = scores.sramOnly ? 0 : tBytes(scores);
+            const readWeights = (weights && !weights.sramOnly) ? tBytes(weights) : 0;
+            const readBytes = readScores + readWeights;
+            const writeBytes = outBytes;
+            const totalIO = readBytes + writeBytes;
+
+            return {
+                flops,
+                readBytes,
+                writeBytes,
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
+                breakdown: [
+                    { label: `Read ${scores.label}`, shape: scores.shape, bytes: readScores },
+                    ...(weights ? [{ label: `Read ${weights.label}`, shape: weights.shape, bytes: readWeights }] : []),
+                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
+                ],
+            };
+        }
+
+        case 'topk': {
+            // Top-k selection per query row: one comparison pass over all logits
+            const logits = inputs[0];
+            const maskInput = inputs[1];
+            if (!logits) return null;
+            const flops = tensorElements(logits.shape);
+            const readLogits = logits.sramOnly ? 0 : tBytes(logits);
+            const readMask = maskInput ? tensorElements(maskInput.shape) * 1 : 0;
+            const readBytes = readLogits + readMask;
+            const writeBytes = outBytes; // int32 indices via bytesPerEl
+            const totalIO = readBytes + writeBytes;
+
+            return {
+                flops,
+                readBytes,
+                writeBytes,
+                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
+                breakdown: [
+                    { label: `Read ${logits.label}`, shape: logits.shape, bytes: readLogits },
+                    ...(maskInput ? [{ label: `Read ${maskInput.label}`, shape: maskInput.shape, bytes: readMask }] : []),
+                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
+                ],
+            };
+        }
+
+        case 'gather': {
+            // Gather selected rows from cache by index: pure memory movement.
+            // Each query token reads its own k rows — S_q·k·rowBytes is the no-reuse
+            // upper bound; the gathered tiles stay in SRAM (output is sramOnly).
+            const idx = inputs[0];
+            const src = inputs[1];
+            if (!src) return null;
+            const readIdx = idx ? tBytes(idx) : 0;
+            const readSrc = tensorBytes(output.shape, src.bytesPerEl);
+            const readBytes = readIdx + readSrc;
+            const writeBytes = outBytes; // 0 when sramOnly
+
+            return {
+                flops: 0,
+                readBytes,
+                writeBytes,
+                arithmeticIntensity: 0,
+                breakdown: [
+                    ...(idx ? [{ label: `Read ${idx.label}`, shape: idx.shape, bytes: readIdx }] : []),
+                    { label: `Gather from ${src.label}`, shape: output.shape, bytes: readSrc },
+                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
                 ],
             };
         }

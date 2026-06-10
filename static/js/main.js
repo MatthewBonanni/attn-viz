@@ -1,12 +1,12 @@
 // main.js — Entry point: D3 setup, zoom/pan, sliders, presets, toggles, update loop
 
 import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './render.js';
-import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, VARIANT_DESCS } from './graphs.js';
+import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, dsaGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
 import { computePipelineTotals, fmtNum, fmtBytes, tensorBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
 
 const GRAPH_FNS = {
-    mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph,
+    mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph, dsa: dsaGraph,
 };
 
 const VARIANTS = [
@@ -14,6 +14,7 @@ const VARIANTS = [
     { id: 'gqa', label: 'GQA' },
     { id: 'mqa', label: 'MQA' },
     { id: 'mla', label: 'MLA' },
+    { id: 'dsa', label: 'DSA' },
 ];
 
 const SLIDER_DEFS = {
@@ -26,6 +27,9 @@ const SLIDER_DEFS = {
     d_c:    { label: 'd_c (KV latent)',   min: 1, max: 4096, step: 1,  default: 512 },
     d_q:    { label: 'd_q (Q latent)',   min: 1, max: 4096, step: 1,  default: 1536 },
     d_r:    { label: 'd_r (RoPE dim)',   min: 1, max: 256,  step: 1,  default: 64 },
+    topk:   { label: 'k (top-k tokens)', min: 1, max: 8192, step: 1,  default: 2048, logScale: true },
+    n_i:    { label: 'n_i (idx heads)',  min: 1, max: 128,  step: 1,  default: 64 },
+    d_i:    { label: 'd_i (idx head dim)', min: 1, max: 256, step: 1, default: 128 },
     tp_size:{ label: 'TP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     dp_size:{ label: 'DP ranks',          min: 1, max: 8,    step: 1,  default: 1 },
     block_size: { label: 'Block size',    min: 1, max: 128,  step: 1,  default: 16 },
@@ -61,6 +65,7 @@ const VARIANT_SLIDERS = {
     gqa: ['n_h', 'd_h', 'n_kv'],
     mqa: ['n_h', 'd_h'],
     mla: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r'],
+    dsa: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i'],
 };
 
 // Model presets
@@ -79,6 +84,8 @@ const PRESETS = [
     { name: 'Command A (111B, MoE)', variant: 'gqa', n_h: 64, d_h: 128, n_kv: 8 },
     { name: 'StarCoder (15B)', variant: 'mqa', n_h: 48, d_h: 128 },
     { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_q: 1536, d_r: 64 },
+    // S/S_q set so sparsity is visible by default (k = 2048 < S)
+    { name: 'DeepSeek V3.2', variant: 'dsa', n_h: 128, d_h: 128, d_c: 512, d_q: 1536, d_r: 64, topk: 2048, n_i: 64, d_i: 128, S: 8192, S_q: 8192 },
 ];
 
 // Default preset index per variant
@@ -87,6 +94,7 @@ const VARIANT_DEFAULT_PRESETS = {
     gqa: 3,   // Llama 3.1 8B
     mqa: 12, // StarCoder (15B)
     mla: 13, // DeepSeek R1
+    dsa: PRESETS.findIndex(p => p.variant === 'dsa'),
 };
 
 // --- State ---
@@ -110,8 +118,14 @@ let currentVariant = 'mha';
 // Apply a preset's model config to params, including sliding-window state, and
 // sync the SWA toggle UI. Execution toggles (flash/paged) are left untouched.
 function applyPresetParams(preset) {
-    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
+    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
         if (preset[key] != null) params[key] = preset[key];
+    }
+    // Presets that pin S/S_q must also reset the per-request arrays, otherwise
+    // stale per-request lengths win at B > 1 and the preset's S never shows.
+    if (preset.S != null || preset.S_q != null) {
+        params.seqLens = Array(params.B).fill(params.S);
+        params.queryLens = Array(params.B).fill(params.S_q);
     }
     params.slidingWindow = !!preset.slidingWindow;
     if (preset.window_size != null) params.window_size = preset.window_size;
@@ -237,6 +251,27 @@ function setupToggles() {
         buildSliders();
         update();
     });
+}
+
+// DSA's core attention is a dedicated fused sparse kernel (FlashMLA-sparse) and its
+// causality lives in the top-k selection, so the Flash and SWA toggles don't apply.
+function updateToggleVisibility() {
+    const isDsa = currentVariant === 'dsa';
+    if (isDsa) {
+        if (params.flashAttn) {
+            params.flashAttn = false;
+            d3.select('#toggle-flash').classed('active', false);
+        }
+        if (params.slidingWindow) {
+            params.slidingWindow = false;
+            d3.select('#toggle-swa').classed('active', false);
+        }
+    }
+    // Hide the whole row (label + switch), not just the switch
+    for (const id of ['#toggle-flash', '#toggle-swa']) {
+        const node = d3.select(id).node();
+        if (node) d3.select(node.parentNode).style('display', isDsa ? 'none' : null);
+    }
 }
 
 // --- Sliders ---
@@ -595,6 +630,13 @@ function updateDerived() {
         const ratio = (params.n_h / params.n_kv).toFixed(1);
         archHtml += `<div class="derived-dim">Heads per group: <span>${gpc}</span> (${ratio}× reduction)</div>`;
     }
+    if (currentVariant === 'dsa') {
+        const dr = params.d_r || 64;
+        // MLA cache (BF16) + FP8 indexer key cache
+        const mlaBytes = (params.d_c + dr) * 2;
+        const idxBytes = params.d_i * 1;
+        archHtml += `<div class="derived-dim">Cache per token: <span>${mlaBytes + idxBytes} B</span> (MLA ${mlaBytes} + idx ${idxBytes})</div>`;
+    }
     d3.select('#derived').html(archHtml);
 
     // Parallelism derived values
@@ -620,6 +662,20 @@ function updateDerived() {
     let rtHtml = '';
     if (params.B > 1) {
         rtHtml += `<div class="derived-dim">\u03a3S_q = <span>${params.sumSq}</span> (\u03a3S = ${params.sumS})</div>`;
+    }
+    if (currentVariant === 'dsa') {
+        const sLens = params.seqLens.slice(0, params.B);
+        const kPerReq = sLens.map(s => Math.min(params.topk, s));
+        if (params.B > 1) {
+            rtHtml += `<div class="derived-dim">k per req: <span>[${kPerReq.join(', ')}]</span></div>`;
+        }
+        const allDense = sLens.every(s => params.topk >= s);
+        if (allDense) {
+            rtHtml += `<div class="derived-dim" style="color:#e67e22">k \u2265 S: dense fallback (no sparsity)</div>`;
+        } else {
+            const frac = kPerReq.reduce((a, b) => a + b, 0) / Math.max(1, params.sumS);
+            rtHtml += `<div class="derived-dim">Attended fraction: <span>${(frac * 100).toFixed(1)}%</span> of context</div>`;
+        }
     }
     if (params.pagedAttn) {
         const sLens = params.seqLens.slice(0, params.B);
@@ -958,9 +1014,12 @@ function annotateGraph(graph) {
     if (params.B > 1) addMultiRequestAnnotations(graph, params);
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.dp_size > 1) addDpAnnotations(graph, params);
-    if (params.slidingWindow) addSlidingWindowAnnotations(graph, params);
+    // DSA: SWA semantics aren't modeled in the indexer mask, and the flash fusion
+    // pattern-matcher would mis-fuse DSA's softmax-without-mask attention block.
+    const isDsa = graph.id === 'dsa';
+    if (params.slidingWindow && !isDsa) addSlidingWindowAnnotations(graph, params);
     if (params.pagedAttn) addPagedAnnotations(graph, params);
-    if (params.flashAttn) addFlashAttnAnnotations(graph, params);
+    if (params.flashAttn && !isDsa) addFlashAttnAnnotations(graph, params);
 }
 
 // --- Sliding window attention annotations ---
@@ -984,6 +1043,7 @@ function addSlidingWindowAnnotations(graph, params) {
 
 function update() {
     scene.selectAll('*').remove();
+    updateToggleVisibility();
 
     if (currentVariant === 'mla') {
         renderMlaStacked();
@@ -1419,6 +1479,7 @@ function addPagedAnnotations(graph, params) {
             let cacheName;
             if (t.id === 'c_KV') cacheName = 'Compressed KV latent';
             else if (t.id === 'k_r') cacheName = 'Decoupled RoPE key';
+            else if (t.id === 'k_I') cacheName = 'Indexer key (FP8)';
             else cacheName = t.id.startsWith('K') ? 'Key' : 'Value';
             t.desc = `${cacheName} cache stored in paged blocks. ` +
                 `Physical layout: ${layoutStr}. ` +
@@ -1452,7 +1513,7 @@ svg.on('click', () => {
 const initPresetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
 const initPreset = PRESETS[initPresetIdx];
 if (initPreset && initPreset.variant) {
-    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r']) {
+    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
         if (initPreset[key] != null) params[key] = initPreset[key];
     }
 }
@@ -1476,6 +1537,7 @@ const GLOSSARY = [
         { term: 'GQA', aka: 'Grouped-Query Attention', def: 'A variant where multiple query heads share a single key/value head, reducing KV cache memory. Used in Llama, Mistral, Qwen, and others.' },
         { term: 'MQA', aka: 'Multi-Query Attention', def: 'The extreme case of GQA where all query heads share a single key/value head. Used in StarCoder and Falcon.' },
         { term: 'MLA', aka: 'Multi-Head Latent Attention', def: 'A variant (from DeepSeek) that compresses keys and values into a low-rank latent space, reducing cache size. Uses separate pipelines for prefill and decode.' },
+        { term: 'DSA', aka: 'DeepSeek Sparse Attention', def: 'MLA plus a lightweight "lightning indexer" that scores all cached tokens per query and keeps only the top-k. Core attention runs over just those k tokens, cutting attention cost from O(S) to O(k) at long context. Used in DeepSeek-V3.2.' },
     ]},
     { section: 'Dimensions', entries: [
         { term: 'B', def: 'Batch size — the number of independent requests being processed together.' },
@@ -1488,6 +1550,8 @@ const GLOSSARY = [
         { term: 'd_c', def: 'KV latent dimension in MLA. The compressed representation size for keys and values.' },
         { term: 'd_q', def: 'Q latent dimension in MLA. The compressed representation size for queries.' },
         { term: 'd_r', def: 'RoPE dimension in MLA. The portion of each head dedicated to rotary position embeddings.' },
+        { term: 'k', aka: 'top-k', def: 'In DSA, the number of cached tokens each query actually attends to — the indexer\'s top-k selection. Effective k = min(topk, S); when S ≤ topk every causal position is selected (dense fallback).' },
+        { term: 'n_i / d_i', def: 'Lightning indexer head count and head dimension in DSA. Small (e.g. 64 × 128) and FP8, so scoring every cached token stays cheap.' },
     ]},
     { section: 'Tensors & Operations', entries: [
         { term: 'Q / K / V', aka: 'Query / Key / Value', def: 'The three projections of the input. Queries ask "what am I looking for?", keys say "what do I contain?", and values carry the actual information to aggregate.' },
@@ -1503,6 +1567,7 @@ const GLOSSARY = [
         { term: 'Tensor Parallelism', aka: 'TP', def: 'Splits attention heads across multiple GPUs. Each GPU computes a subset of heads, then results are combined with an all-reduce operation.' },
         { term: 'Data Parallelism', aka: 'DP', def: 'Splits the input batch across multiple GPUs along the sequence dimension. Each GPU processes a subset of the data independently using the full model weights.' },
         { term: 'KV cache', def: 'Stores previously computed key and value tensors so they don\'t need to be recomputed for each new token during autoregressive generation.' },
+        { term: 'Lightning indexer', def: 'DSA\'s token selector: a few small FP8 heads score every cached token against each query (Σ_h w·ReLU(q_I·k_I)), and only the top-k tokens proceed to real attention. Dense over S but far cheaper than attention itself.' },
     ]},
     { section: 'Performance', entries: [
         { term: 'FLOPs', aka: 'Floating-point operations', def: 'A measure of computational cost. More FLOPs means more arithmetic the GPU must perform.' },

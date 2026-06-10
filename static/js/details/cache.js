@@ -27,7 +27,7 @@ export function drawPagedCacheDetail(svg, tensor, params) {
     // Per-token dims from tensor annotation
     const perTokenDims = tensor.pagedBlockDims || ['n_h', 'd_h'];
     const perTokenShape = tensor.pagedBlockShape || [];
-    const perTokenSize = perTokenShape.reduce((a, b) => a * b, 1) * 2; // bf16
+    const perTokenSize = perTokenShape.reduce((a, b) => a * b, 1) * (tensor.bytesPerEl || 2);
     const blockBytes = bs * perTokenSize;
 
     // Source tensor info (attached during annotation)
