@@ -1512,7 +1512,7 @@ export function renderGraph(g, graph, _params, onOpClick, onTensorClick, deselec
             const tooltip = d3.select('#tooltip');
             const shapeStr = `[${t.shape.join(', ')}]`;
             const dimStr = t.dimNames ? t.dimNames.map((n, i) => `${n}=${t.shape[i]}`).join(', ') : '';
-            tooltip.select('.tt-label').text(t.label);
+            tooltip.select('.tt-label').text(t.checkpointKey != null ? `${t.label} (${t.checkpointKey})` : t.label);
             tooltip.select('.tt-shape').text(`Shape: ${shapeStr}`);
             tooltip.select('.tt-dims').text(dimStr);
             let desc = t.desc || '';
