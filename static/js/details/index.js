@@ -155,7 +155,7 @@ function _renderTensorDetail(tensor, params) {
     panel.classed('visible', true).classed('flash-wide', false).classed('broadcast-wide', false);
     d3.select('#detail-body .flash-controls').remove();
     _shiftStatsOverlay(true);
-    d3.select('#detail-title').text(tensor.label);
+    d3.select('#detail-title').text(tensor.checkpointKey != null ? `${tensor.label} (${tensor.checkpointKey})` : tensor.label);
 
     let descHtml = tensor.desc || '';
     if (tensor.type === 'mask') {
