@@ -4,6 +4,7 @@ import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, dsaGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
 import { computePipelineTotals, fmtNum, fmtBytes, tensorBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
+import { readUrlState, writeUrlState } from './url-state.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph, dsa: dsaGraph,
@@ -130,6 +131,38 @@ function applyPresetParams(preset) {
     params.slidingWindow = !!preset.slidingWindow;
     if (preset.window_size != null) params.window_size = preset.window_size;
     d3.select('#toggle-swa').classed('active', params.slidingWindow);
+}
+
+// What params would look like on a fresh load of this preset — the reference the
+// URL encodes against, so only genuine deviations end up in the hash.
+function presetBaseline(preset) {
+    const base = {};
+    for (const [k, v] of Object.entries(SLIDER_DEFS)) base[k] = v.default;
+    base.flashAttn = false;
+    base.pagedAttn = false;
+    base.slidingWindow = false;
+    if (preset) {
+        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
+            if (preset[key] != null) base[key] = preset[key];
+        }
+        base.slidingWindow = !!preset.slidingWindow;
+        if (preset.window_size != null) base.window_size = preset.window_size;
+    }
+    return base;
+}
+
+function currentPresetIdx() {
+    return parseInt(d3.select('#preset-select').property('value'), 10) || 0;
+}
+
+function syncUrl() {
+    const idx = currentPresetIdx();
+    writeUrlState({
+        variant: currentVariant,
+        preset: idx,
+        params,
+        baseline: presetBaseline(PRESETS[idx]),
+    });
 }
 
 // --- SVG + zoom setup ---
@@ -1044,6 +1077,7 @@ function addSlidingWindowAnnotations(graph, params) {
 function update() {
     scene.selectAll('*').remove();
     updateToggleVisibility();
+    syncUrl();
 
     if (currentVariant === 'mla') {
         renderMlaStacked();
@@ -1509,25 +1543,98 @@ svg.on('click', () => {
 
 // --- Init ---
 
-// Apply default preset for initial variant
-const initPresetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
-const initPreset = PRESETS[initPresetIdx];
-if (initPreset && initPreset.variant) {
-    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
-        if (initPreset[key] != null) params[key] = initPreset[key];
+// Load state from the hash, falling back to the default preset. A link overrides
+// the defaults: variant and preset first, then the individual values the link
+// recorded as differing from that preset. Returns the preset index in effect.
+function applyStateFromUrl() {
+    const urlState = readUrlState();
+    if (urlState && urlState.variant && VARIANTS.some(v => v.id === urlState.variant)) {
+        currentVariant = urlState.variant;
     }
+
+    let presetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
+    if (urlState && urlState.preset != null && PRESETS[urlState.preset]
+        && (!urlState.variant || PRESETS[urlState.preset].variant === currentVariant)) {
+        presetIdx = urlState.preset;
+    }
+
+    // Start from a clean baseline so a link never inherits the previous view
+    for (const [k, v] of Object.entries(SLIDER_DEFS)) params[k] = v.default;
+    params.flashAttn = false;
+    params.pagedAttn = false;
+    params.slidingWindow = false;
+
+    const preset = PRESETS[presetIdx];
+    if (preset && preset.variant) {
+        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
+            if (preset[key] != null) params[key] = preset[key];
+        }
+        params.slidingWindow = !!preset.slidingWindow;
+        if (preset.window_size != null) params.window_size = preset.window_size;
+    }
+
+    if (urlState) {
+        for (const [key, value] of Object.entries(urlState.values)) {
+            const def = SLIDER_DEFS[key];
+            params[key] = def ? Math.max(def.min, Math.min(def.max, value)) : value;
+        }
+        Object.assign(params, urlState.flags);
+        // Constraints the sliders normally enforce still have to hold
+        params.n_kv = nearestDivisor(params.n_h, params.n_kv);
+        params.tp_size = Math.min(params.tp_size, maxTpForHeads(params.n_h));
+    }
+    params.seqLens = urlState?.seqLens || Array(params.B).fill(params.S);
+    params.queryLens = urlState?.queryLens || Array(params.B).fill(params.S_q);
+    return presetIdx;
 }
 
+function syncStateUI(presetIdx) {
+    d3.selectAll('#variant-tabs button')
+        .classed('active', function() { return this.dataset.variant === currentVariant; });
+    updateVariantDesc();
+    d3.select('#preset-select').property('value', String(presetIdx));
+    d3.select('#toggle-flash').classed('active', params.flashAttn);
+    d3.select('#toggle-paged').classed('active', params.pagedAttn);
+    d3.select('#toggle-swa').classed('active', params.slidingWindow);
+}
+
+const initPresetIdx = applyStateFromUrl();
+
 buildVariantTabs();
-updateVariantDesc();
 buildPresets();
-d3.select('#preset-select').property('value', String(initPresetIdx));
+syncStateUI(initPresetIdx);
 setupToggles();
 buildSliders();
 update();
 setTimeout(fitToView, 100);
 
 window.addEventListener('resize', () => fitToView());
+
+// Pasting a link into an already-open tab, or using back/forward, only changes
+// the hash — no document load — so re-apply state here. Our own URL writes use
+// replaceState, which does not fire this event.
+window.addEventListener('hashchange', () => {
+    hideDetail();
+    const presetIdx = applyStateFromUrl();
+    syncStateUI(presetIdx);
+    buildSliders();
+    update();
+    setTimeout(fitToView, 100);
+});
+
+// --- Share link ---
+
+d3.select('#share-btn').on('click', async function() {
+    const btn = d3.select(this);
+    try {
+        await navigator.clipboard.writeText(window.location.href);
+        btn.classed('copied', true).text('Copied!');
+    } catch {
+        btn.text('Press ⌘C');
+        window.getSelection().selectAllChildren(document.body);
+    }
+    setTimeout(() => btn.classed('copied', false).text('Copy link'), 1600);
+});
 
 // --- Glossary ---
 

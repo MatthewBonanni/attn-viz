@@ -220,15 +220,18 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 .badge-bg { rx: 3; ry: 3; }
 .stage-label { font-size: 9px; fill: #555; font-weight: 500; text-anchor: middle; font-family: 'Inter', system-ui, sans-serif; }
 
-/* Glossary button */
-#glossary-btn {
-    position: absolute; bottom: 16px; left: 16px; z-index: 100;
+/* Glossary + share buttons */
+#glossary-btn, #share-btn {
+    position: absolute; bottom: 16px; z-index: 100;
     background: #1e2030; border: 1px solid #2a2d3a; color: #888;
     font-size: 11px; padding: 6px 14px; border-radius: 6px; cursor: pointer;
     font-weight: 500; transition: all 0.15s;
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
-#glossary-btn:hover { background: #252840; color: #bbb; border-color: #3b5bdb; }
+#glossary-btn { left: 16px; }
+#share-btn { left: 104px; }
+#glossary-btn:hover, #share-btn:hover { background: #252840; color: #bbb; border-color: #3b5bdb; }
+#share-btn.copied { color: #2ecc71; border-color: #2ecc71; }
 
 /* Glossary modal */
 #glossary-overlay {
@@ -367,6 +370,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 
 <div id="viz-container">
     <button id="glossary-btn">Glossary</button>
+    <button id="share-btn" title="Copy a link that restores this exact view">Copy link</button>
     <svg id="main-svg">
         <defs>
             <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto" markerUnits="userSpaceOnUse">
