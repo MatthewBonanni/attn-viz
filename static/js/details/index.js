@@ -9,6 +9,7 @@ import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
 import { drawFlashAttnDetail } from './flash-attn.js';
 import { drawTopkDetail } from './topk.js';
+import { drawReluWsumDetail } from './relu-wsum.js';
 import { drawSoftmaxOpDetail } from './softmax.js';
 import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
 
@@ -132,6 +133,9 @@ function _renderOpDetail(op, graph, params) {
             break;
         case 'topk':
             drawTopkDetail(svg, op, tensorMap, params);
+            break;
+        case 'relu_wsum':
+            drawReluWsumDetail(svg, op, tensorMap, params);
             break;
         case 'softmax':
             drawSoftmaxOpDetail(svg, op, tensorMap, params);
