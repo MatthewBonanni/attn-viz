@@ -4,7 +4,7 @@ import { drawMaskDetail, drawMaskTensorDetail } from './mask.js';
 import { drawPagedMaskDetail } from './paged-mask.js';
 import { drawBroadcastDetail } from './broadcast.js';
 import { drawGenericDetail } from './generic.js';
-import { drawPagedCacheDetail } from './cache.js';
+import { drawPagedCacheDetail, drawCacheOpDetail } from './cache.js';
 import { drawTensorShapeDetail } from './tensor-shape.js';
 import { drawRopeDetail } from './rope.js';
 import { drawFlashAttnDetail } from './flash-attn.js';
@@ -136,6 +136,9 @@ function _renderOpDetail(op, graph, params) {
             break;
         case 'relu_wsum':
             drawReluWsumDetail(svg, op, tensorMap, params);
+            break;
+        case 'cache':
+            drawCacheOpDetail(svg, op, tensorMap, params);
             break;
         case 'softmax':
             drawSoftmaxOpDetail(svg, op, tensorMap, params);

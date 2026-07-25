@@ -1,10 +1,192 @@
-// cache.js — Paged KV cache detail visualization
-// Shows how K'/V' new tokens get sliced into fixed-size blocks and placed into a block table.
+// cache.js — KV cache detail visualizations
+//  - drawCacheOpDetail: the append itself (contiguous view), per request
+//  - drawPagedCacheDetail: how new tokens get sliced into fixed-size blocks and
+//    placed into a block table
+//
+// The cache op delegates to the paged view when PagedAttention is on, since the
+// block layout is then the more truthful picture of what the append does.
 
 import { fmtBytes } from '../costs.js';
 import { RANK_COLORS } from '../render.js';
 
 const SEQ_COLORS = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c'];
+
+// Split a cache tensor's shape into (sequence length, per-token dims).
+// 3D [n_kv, S, d_h] → per-token [n_kv, d_h]; 2D [S, d_c] → per-token [d_c].
+function perTokenLayout(tensor) {
+    const is3D = tensor.shape.length === 3;
+    const dimNames = tensor.dimNames || [];
+    return {
+        S: is3D ? tensor.shape[1] : tensor.shape[0],
+        dims: is3D ? [dimNames[0], dimNames[2]] : dimNames.slice(1),
+        shape: is3D ? [tensor.shape[0], tensor.shape[2]] : tensor.shape.slice(1),
+    };
+}
+
+export function drawCacheOpDetail(svg, op, tensorMap, params) {
+    const out = tensorMap[op.output];
+    const src = tensorMap[op.inputs[0]];
+    if (!out) return;
+
+    // With PagedAttention on, the block layout is the real story — reuse that view
+    if (params.pagedAttn && out.badge === 'PAGED') {
+        drawPagedCacheDetail(svg, out, params);
+        return;
+    }
+
+    const B = params.B || 1;
+    const sLens = (params.seqLens || [params.S]).slice(0, B);
+    const sqLens = (params.queryLens || [params.S_q]).slice(0, B);
+    const { dims, shape: perTokenShape } = perTokenLayout(out);
+    const bytesPerEl = out.bytesPerEl || 2;
+    const elemsPerToken = perTokenShape.reduce((a, b) => a * b, 1);
+    const bytesPerToken = elemsPerToken * bytesPerEl;
+
+    const swaActive = !!params.slidingWindow;
+    const swaW = params.window_size;
+    const color = out.color || '#16a085';
+
+    const pad = 20, innerW = 440;
+    const g = svg.append('g').attr('transform', `translate(${pad}, 20)`);
+    let y = 0;
+
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', innerW / 2).attr('y', y)
+        .text(`Append new tokens to ${out.label}`);
+    y += 15;
+    g.append('text')
+        .attr('x', innerW / 2).attr('y', y)
+        .attr('text-anchor', 'middle').attr('font-size', '9px').attr('fill', '#888')
+        .text(src ? `${src.label} [${src.shape.join(' × ')}] → rows ${'S − S_q'} … ${'S − 1'} of the cache` : '');
+    y += 24;
+
+    // --- Per-request growth bars, all scaled by the longest sequence ---
+    const barX = 52, barW = 292, barH = 15, rowGap = 7;
+    const maxS = Math.max(...sLens, 1);
+
+    for (let i = 0; i < B; i++) {
+        const S = sLens[i], S_q = Math.min(sqLens[i], S);
+        const existing = S - S_q;
+        const scale = (n) => (n / maxS) * barW;
+
+        g.append('text')
+            .attr('x', 0).attr('y', y + barH / 2 + 3)
+            .attr('font-size', '9px').attr('fill', '#999')
+            .text(B > 1 ? `Req ${i}` : 'Cache');
+
+        // Track
+        g.append('rect')
+            .attr('x', barX).attr('y', y).attr('width', barW).attr('height', barH)
+            .attr('fill', '#12141c').attr('rx', 2);
+
+        if (existing > 0) {
+            g.append('rect')
+                .attr('x', barX).attr('y', y)
+                .attr('width', scale(existing)).attr('height', barH)
+                .attr('fill', color).attr('fill-opacity', 0.28);
+        }
+        // The append itself
+        g.append('rect')
+            .attr('x', barX + scale(existing)).attr('y', y)
+            .attr('width', Math.max(scale(S_q), 1.5)).attr('height', barH)
+            .attr('fill', color).attr('fill-opacity', 0.9)
+            .attr('stroke', '#fff').attr('stroke-width', 0.75)
+            .attr('stroke-dasharray', '2,1').attr('stroke-opacity', 0.55);
+
+        // Rows before S-W fall outside the window — freeable regardless of whether
+        // they were appended in this step, so this is an overlay, not a segment
+        if (swaActive && swaW < S) {
+            g.append('rect')
+                .attr('x', barX).attr('y', y)
+                .attr('width', scale(S - swaW)).attr('height', barH).attr('rx', 2)
+                .attr('fill', '#0f1117').attr('fill-opacity', 0.72)
+                .attr('stroke', '#5a6070').attr('stroke-width', 0.75)
+                .attr('stroke-dasharray', '3,2');
+        }
+
+        const kind = S_q === 1 ? 'decode' : S_q >= S ? 'prefill' : S_q < 16 ? 'spec' : 'extend';
+        g.append('text')
+            .attr('x', barX + barW + 6).attr('y', y + barH / 2 + 3)
+            .attr('font-size', '9px').attr('fill', '#888')
+            .text(`S=${S} (+${S_q}, ${kind})`);
+        y += barH + rowGap;
+    }
+    y += 6;
+
+    const legend = [
+        [color, 0.28, 'already cached', 'none'],
+        [color, 0.9, 'appended now', '#fff'],
+        ...(swaActive ? [['#0f1117', 0.72, 'outside window', '#5a6070']] : []),
+    ];
+    let lx = barX;
+    for (const [c, opacity, label, stroke] of legend) {
+        g.append('rect').attr('x', lx).attr('y', y - 8)
+            .attr('width', 10).attr('height', 10).attr('rx', 1)
+            .attr('fill', c).attr('fill-opacity', opacity)
+            .attr('stroke', stroke).attr('stroke-width', stroke === 'none' ? 0 : 0.75)
+            .attr('stroke-dasharray', stroke === '#fff' ? '2,1' : '3,2');
+        g.append('text').attr('x', lx + 14).attr('y', y + 1)
+            .attr('font-size', '9px').attr('fill', '#aaa').text(label);
+        lx += 14 + label.length * 5.2 + 14;
+    }
+    y += 26;
+
+    // --- What one token costs ---
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', innerW / 2).attr('y', y)
+        .text('Cost per cached token');
+    y += 18;
+
+    const tokW = 132, tokH = 34, tokX = (innerW - tokW) / 2;
+    g.append('rect')
+        .attr('x', tokX).attr('y', y).attr('width', tokW).attr('height', tokH).attr('rx', 3)
+        .attr('fill', color).attr('fill-opacity', 0.5)
+        .attr('stroke', color).attr('stroke-width', 1);
+    g.append('text').attr('class', 'tensor-label')
+        .attr('x', innerW / 2).attr('y', y + tokH / 2 + 4)
+        .text('1 token');
+    g.append('text')
+        .attr('x', tokX - 8).attr('y', y + tokH / 2 + 3)
+        .attr('text-anchor', 'end').attr('font-size', '9px').attr('fill', '#999')
+        .text(dims.filter(Boolean).join(' × ') || 'd');
+    g.append('text')
+        .attr('x', tokX + tokW + 8).attr('y', y + tokH / 2 + 3)
+        .attr('font-size', '9px').attr('fill', '#999')
+        .text(`${fmtBytes(bytesPerToken)}`);
+    y += tokH + 20;
+
+    const dtype = { 1: 'fp8', 2: 'bf16', 4: 'int32' }[bytesPerEl] || `${bytesPerEl}B/el`;
+    const totalNew = sqLens.reduce((a, b, i) => a + Math.min(b, sLens[i]), 0);
+    const totalS = sLens.reduce((a, b) => a + b, 0);
+    const rows = [
+        [`Per token`, `${perTokenShape.join(' × ')} = ${elemsPerToken.toLocaleString()} el × ${bytesPerEl}B (${dtype}) = ${fmtBytes(bytesPerToken)}`],
+        [`Appended`, `${totalNew.toLocaleString()} token${totalNew === 1 ? '' : 's'} = ${fmtBytes(totalNew * bytesPerToken)}`],
+        [`Cache after`, `${totalS.toLocaleString()} tokens = ${fmtBytes(totalS * bytesPerToken)}`],
+    ];
+    const growth = [1024, 8192, 131072]
+        .map(n => `${n >= 1024 ? `${n / 1024}K` : n} → ${fmtBytes(n * bytesPerToken)}`)
+        .join('   ·   ');
+    rows.push(['Grows as', `${growth}   (one request)`]);
+
+    for (const [label, value] of rows) {
+        g.append('text').attr('x', 0).attr('y', y)
+            .attr('font-size', '10px').attr('fill', '#888').text(label + ':');
+        g.append('text').attr('x', 76).attr('y', y)
+            .attr('font-size', '10px').attr('fill', '#bbb').text(value);
+        y += 15;
+    }
+
+    y += 8;
+    g.append('text').attr('x', 0).attr('y', y)
+        .attr('font-size', '9px').attr('fill', '#8a8f9e').attr('font-style', 'italic')
+        .text('No math — a scatter-write kernel (vLLM: reshape_and_cache) reads the new');
+    y += 12;
+    g.append('text').attr('x', 0).attr('y', y)
+        .attr('font-size', '9px').attr('fill', '#8a8f9e').attr('font-style', 'italic')
+        .text('rows and writes them into cache memory. Pure bandwidth.');
+
+    svg.attr('height', y + 30);
+}
 
 export function drawPagedCacheDetail(svg, tensor, params) {
     const bs = params.block_size;
