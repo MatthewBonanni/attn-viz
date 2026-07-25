@@ -26,6 +26,35 @@ export function maskLayout(svgW, rows, cols) {
     return { cellSize, labelEvery, schematic };
 }
 
+// Horizontal swatch legend that advances by label length and wraps, so entries
+// can't collide the way fixed x offsets do. `items` are {color, opacity, label}.
+// Returns the y offset just past the last row.
+export function drawSwatchLegend(g, x, y, maxW, items, fontSize = 11) {
+    const swatch = 11, gap = 6, itemGap = 16, rowH = fontSize + 7;
+    let cx = x, cy = y, rows = 1;
+    for (const item of items) {
+        // Generous per-char estimate — better to wrap early than to clip
+        const textW = item.label.length * fontSize * 0.58;
+        const itemW = swatch + gap + textW;
+        if (cx > x && cx + itemW > x + maxW) {
+            cx = x;
+            cy += rowH;
+            rows++;
+        }
+        g.append('rect')
+            .attr('x', cx).attr('y', cy).attr('width', swatch).attr('height', swatch).attr('rx', 2)
+            .attr('fill', item.color).attr('fill-opacity', item.opacity ?? 0.85)
+            .attr('stroke', item.stroke || 'none')
+            .attr('stroke-width', item.stroke ? 0.75 : 0);
+        g.append('text')
+            .attr('x', cx + swatch + gap).attr('y', cy + swatch - 1)
+            .attr('font-size', fontSize + 'px').attr('fill', '#aaa')
+            .text(item.label);
+        cx += itemW + itemGap;
+    }
+    return cy + rowH;
+}
+
 export function drawDetailBlock(g, x, y, w, h, color, label, sharded) {
     g.append('rect')
         .attr('x', x).attr('y', y).attr('width', w).attr('height', h)

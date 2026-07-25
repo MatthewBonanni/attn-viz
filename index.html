@@ -170,8 +170,11 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 #close-detail:hover { background: #2a2d3a; color: #fff; }
 #detail-body { padding: 20px; overflow-y: auto; max-height: calc(100vh - 60px); }
 #detail-body svg { width: 100%; }
-#detail-body .dim-label { font-size: 12px !important; }
-#detail-body .tensor-label { font-size: 13px !important; }
+/* Detail-panel text defaults larger than the graph's. Scoped to elements that
+   don't set their own size, since a CSS rule outranks an SVG presentation
+   attribute and would otherwise silently discard per-element sizes. */
+#detail-body .dim-label:not([font-size]) { font-size: 12px; }
+#detail-body .tensor-label:not([font-size]) { font-size: 13px; }
 #detail-desc { font-size: 12px; color: #aaa; line-height: 1.6; margin-top: 16px; }
 
 /* Stats overlay */

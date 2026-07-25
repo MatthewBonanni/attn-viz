@@ -1,6 +1,12 @@
 // mask.js — Standard mask, mask tensor, and paged mask tensor detail visualizations
-import { detailMetrics, maskLayout } from './shared.js';
+import { detailMetrics, maskLayout, drawSwatchLegend } from './shared.js';
 import { drawSoftmaxSection } from './softmax.js';
+
+const BLOCK_DIAG_LEGEND = [
+    { color: '#1abc9c', opacity: 0.85, label: 'Causal attend (same seq, i ≥ j)' },
+    { color: '#2c3e50', opacity: 0.5, label: 'Masked (i < j) → -∞' },
+    { color: '#1a1520', opacity: 0.8, label: 'Cross-seq' },
+];
 
 // Deterministic pseudo-random score for cell (i, j) — looks natural, stable across rerenders
 function pseudoScore(i, j) {
@@ -612,20 +618,9 @@ function _drawBlockDiagMaskOnly(svg, params) {
     drawBoundaryLines(g, 10);
 
     const descY = gridH + 26;
-    g.append('rect').attr('x', 0).attr('y', descY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#1abc9c').attr('fill-opacity', 0.85).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', descY + 10)
-        .attr('fill', '#aaa').text('Causal attend (same seq, i \u2265 j)');
-    g.append('rect').attr('x', 140).attr('y', descY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#2c3e50').attr('fill-opacity', 0.5).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 158).attr('y', descY + 10)
-        .attr('fill', '#aaa').text('Masked (i < j) \u2192 -\u221e');
-    g.append('rect').attr('x', 320).attr('y', descY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#1a1520').attr('fill-opacity', 0.8).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 338).attr('y', descY + 10)
-        .attr('fill', '#aaa').text('Cross-seq');
+    const legendEnd = drawSwatchLegend(g, 0, descY, svgW - 40, BLOCK_DIAG_LEGEND);
 
-    svg.attr('height', 38 + descY + 30);
+    svg.attr('height', 38 + legendEnd + 18);
 }
 
 // --- Multi-request block-diagonal mask + scores + softmax detail (op detail) ---
@@ -937,21 +932,10 @@ export function drawPagedMaskTensorDetail(svg, _tensor, params) {
     drawBoundaryLines(g, yOff + 10);
 
     const maskLegendY = yOff + gridH + 26;
-    g.append('rect').attr('x', 0).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#1abc9c').attr('fill-opacity', 0.85).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 18).attr('y', maskLegendY + 10)
-        .attr('fill', '#aaa').text('Causal attend (same seq, i \u2265 j)');
-    g.append('rect').attr('x', 140).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#2c3e50').attr('fill-opacity', 0.5).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 158).attr('y', maskLegendY + 10)
-        .attr('fill', '#aaa').text('Masked (i < j) \u2192 -\u221e');
-    g.append('rect').attr('x', 320).attr('y', maskLegendY).attr('width', 12).attr('height', 12)
-        .attr('fill', '#1a1520').attr('fill-opacity', 0.8).attr('rx', 2);
-    g.append('text').attr('class', 'dim-label').attr('x', 338).attr('y', maskLegendY + 10)
-        .attr('fill', '#aaa').text('Cross-seq');
+    const maskLegendEnd = drawSwatchLegend(g, 0, maskLegendY, svgW - 40, BLOCK_DIAG_LEGEND);
 
     // --- Part 2: Attention weights heatmap ---
-    let y2 = maskLegendY + 46;
+    let y2 = maskLegendEnd + 28;
     g.append('text').attr('class', 'tensor-label')
         .attr('x', gridW / 2).attr('y', y2)
         .text('Attention Weights (after softmax)');
