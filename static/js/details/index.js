@@ -13,7 +13,7 @@ import { drawReluWsumDetail } from './relu-wsum.js';
 import { drawGatherDetail } from './gather.js';
 import { drawAddDetail } from './add.js';
 import { drawSoftmaxOpDetail } from './softmax.js';
-import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
+import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold, GPU_SPECS } from '../costs.js';
 
 // Track currently displayed detail for live refresh
 let _currentDetail = null;  // { type: 'op'|'tensor'|'group', id, graphId }
@@ -71,13 +71,19 @@ function _renderOpDetail(op, graph, params) {
     let descHtml = op.desc || '';
     const cost = isFlash ? null : computeOpCost(op, tensorMap);
     if (cost && (cost.flops > 0 || cost.readBytes > 0)) {
-        const threshold = computeRooflineThreshold('H100 SXM');
         const totalBytes = cost.readBytes + cost.writeBytes;
         const ai = cost.arithmeticIntensity;
+        // The stats overlay reports every GPU, so name them here too rather than
+        // silently judging the regime against one hardcoded device
+        const gpuKeys = Object.keys(GPU_SPECS);
+        const computeBound = gpuKeys.filter(k => ai >= computeRooflineThreshold(k));
+        const memoryBound = gpuKeys.filter(k => ai < computeRooflineThreshold(k));
         const regime = cost.flops === 0 ? 'MEMORY-ONLY'
-            : ai >= threshold ? 'COMPUTE-BOUND' : 'MEMORY-BOUND';
+            : memoryBound.length === 0 ? 'COMPUTE-BOUND'
+            : computeBound.length === 0 ? 'MEMORY-BOUND' : 'MIXED';
         const regimeColor = regime === 'COMPUTE-BOUND' ? '#2ecc71'
-            : regime === 'MEMORY-BOUND' ? '#e74c3c' : '#888';
+            : regime === 'MEMORY-BOUND' ? '#e74c3c'
+            : regime === 'MIXED' ? '#f39c12' : '#888';
 
         descHtml += `<div style="margin-top:12px;padding:10px 12px;background:#1a1d2a;border-radius:6px;border:1px solid #2a2d3a;font-size:11px;line-height:1.8">`;
         descHtml += `<div style="font-weight:600;color:#bbb;margin-bottom:4px;font-size:12px">Cost Analysis</div>`;
@@ -103,7 +109,20 @@ function _renderOpDetail(op, graph, params) {
             descHtml += ` &nbsp;|&nbsp; <span style="color:#888">Arithmetic intensity:</span> <span style="color:#7c8cf8;font-weight:600">${ai.toFixed(1)}</span> <span style="color:#555">FLOPs/byte</span>`;
         }
         descHtml += `</div>`;
-        descHtml += `<div style="margin-top:2px"><span style="color:${regimeColor};font-weight:600">${regime}</span> <span style="color:#555;font-size:10px">(threshold: ${threshold.toFixed(0)} FLOPs/byte on H100)</span></div>`;
+        // Thresholds are not monotonic in device order (B200's is below H100's),
+        // so take the actual extremes
+        const thresholds = gpuKeys.map(computeRooflineThreshold);
+        let regimeNote;
+        if (cost.flops === 0) {
+            regimeNote = 'no math — bandwidth only';
+        } else if (regime === 'MIXED') {
+            regimeNote = `compute-bound on ${computeBound.join(', ')} · memory-bound on ${memoryBound.join(', ')}`;
+        } else if (regime === 'MEMORY-BOUND') {
+            regimeNote = `on every GPU — below ${Math.min(...thresholds).toFixed(0)} FLOPs/byte`;
+        } else {
+            regimeNote = `on every GPU — above ${Math.max(...thresholds).toFixed(0)} FLOPs/byte`;
+        }
+        descHtml += `<div style="margin-top:2px"><span style="color:${regimeColor};font-weight:600">${regime}</span> <span style="color:#555;font-size:10px">(${regimeNote})</span></div>`;
         descHtml += `</div>`;
     }
     d3.select('#detail-desc').html(descHtml);
