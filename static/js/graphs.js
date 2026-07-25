@@ -512,20 +512,22 @@ export function mlaAbsorbedGraph(p) {
             { id: 'k_r_new',   shape: [S_q, dr],          label: "k_r_new'", stage: 3, row: 2, color: '#ff7043', dimNames: [lq,'d_r'],
               desc: `RoPE applied to new decoupled keys before caching.` },
             // Absorbed weights
-            { id: 'W_QK',     shape: [n_h, d_q, d_c],      label: 'W_QK',    stage: 4, row: 1, color: '#7b68ee', dimNames: ['n_h','d_q','d_c'], type: 'weight', badge: 'ABSORBED',
+            // Content query path on row 0 with c_q, RoPE query path on row 1 — mirrors
+            // the MHA-style graph's W↑q / W_qr split
+            { id: 'W_QK',     shape: [n_h, d_q, d_c],      label: 'W_QK',    stage: 4, row: 0, color: '#7b68ee', dimNames: ['n_h','d_q','d_c'], type: 'weight', badge: 'ABSORBED',
               desc: `Absorbed QK content weight: W_QK_h = W_UQ_h @ W_UK_h^T per head, shape [d_q, d_c] = [${d_q}, ${d_c}]. Maps query latent to KV latent space for content-based attention.` },
-            { id: 'W_QR',     shape: [n_h, d_q, dr],        label: 'W_qr',    stage: 4, row: 0, color: '#7b68ee', dimNames: ['n_h','d_q','d_r'], type: 'weight', badge: 'ABSORBED',
+            { id: 'W_QR',     shape: [n_h, d_q, dr],        label: 'W_qr',    stage: 4, row: 1, color: '#7b68ee', dimNames: ['n_h','d_q','d_r'], type: 'weight', badge: 'ABSORBED',
               desc: `Absorbed RoPE query weight: extracts the RoPE query component from c_q, per head. Shape [d_q, d_r] = [${d_q}, ${dr}] per head.` },
             { id: 'c_KV',     shape: [S, d_c],           label: 'c_kv',    stage: 4, row: 4, color: '#e67e22', dimNames: [ls,'d_c'], cache: true,
               desc: `Full compressed KV cache: new latents appended → S total. Total cache per token = d_c + d_r = ${d_c} + ${dr} = ${d_c + dr}.` },
             { id: 'k_r',      shape: [S, dr],            label: "k_r'",    stage: 4, row: 5, color: '#ff7043', dimNames: [ls,'d_r'], cache: true,
               desc: `Full RoPE key cache: new RoPE'd keys appended → S total. Provides positional information that c_kv cannot carry.` },
             // Projected queries
-            { id: 'q_rp',     shape: [n_h, S_q, dr],     label: 'q_r',     stage: 6, row: 0, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
-              desc: `Pre-RoPE query component: c_q @ W_qr per head → [n_h, S_q, d_r=${dr}].` },
-            { id: 'q_lat',    shape: [n_h, S_q, d_c],    label: "q'",      stage: 7, row: 1, color: '#e74c3c', dimNames: ['n_h',lq,'d_c'],
+            { id: 'q_lat',    shape: [n_h, S_q, d_c],    label: "q'",      stage: 6, row: 0, color: '#e74c3c', dimNames: ['n_h',lq,'d_c'],
               desc: `Absorbed content query: c_q @ W_QK per head → [n_h, S_q, d_c=${d_c}]. Maps from d_q=${d_q} query latent to d_c=${d_c} KV latent space.` },
-            { id: 'q_r',      shape: [n_h, S_q, dr],     label: "q_r'",    stage: 7, row: 0, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
+            { id: 'q_rp',     shape: [n_h, S_q, dr],     label: 'q_r',     stage: 6, row: 1, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
+              desc: `Pre-RoPE query component: c_q @ W_qr per head → [n_h, S_q, d_r=${dr}].` },
+            { id: 'q_r',      shape: [n_h, S_q, dr],     label: "q_r'",    stage: 7, row: 1, color: '#ff7043', dimNames: ['n_h',lq,'d_r'],
               desc: `RoPE query — after applying rotary position embedding to q_r.` },
             // Scores (split into content + RoPE + add)
             { id: 's_content', shape: [n_h, S_q, S],     label: "q'c_kvᵀ", stage: 9, row: 1, color: '#9b59b6', dimNames: ['n_h',lq,ls],
