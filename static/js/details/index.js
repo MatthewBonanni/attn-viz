@@ -11,6 +11,7 @@ import { drawFlashAttnDetail } from './flash-attn.js';
 import { drawTopkDetail } from './topk.js';
 import { drawReluWsumDetail } from './relu-wsum.js';
 import { drawGatherDetail } from './gather.js';
+import { drawAddDetail } from './add.js';
 import { drawSoftmaxOpDetail } from './softmax.js';
 import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold } from '../costs.js';
 
@@ -143,6 +144,9 @@ function _renderOpDetail(op, graph, params) {
             break;
         case 'gather':
             drawGatherDetail(svg, op, tensorMap, params);
+            break;
+        case 'add':
+            drawAddDetail(svg, op, tensorMap, params);
             break;
         case 'softmax':
             drawSoftmaxOpDetail(svg, op, tensorMap, params);
