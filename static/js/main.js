@@ -3,7 +3,10 @@
 import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './render.js';
 import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, dsaGraph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
-import { computePipelineTotals, fmtNum, fmtBytes, tensorBytes, computeRooflineThreshold, GPU_SPECS } from './costs.js';
+import {
+    computePipelineTotals, computePipelineRoofline,
+    fmtNum, fmtBytes, tensorBytes, GPU_SPECS, GPU_SPEC_AS_OF,
+} from './costs.js';
 import { readUrlState, writeUrlState } from './url-state.js';
 
 const GRAPH_FNS = {
@@ -755,7 +758,10 @@ function computeMlaCrossover(params) {
     const effS = Math.max(S, 2);
     const sqLo = 1;
     const sqHi = Math.min(effS, 201);
-    const base = { ...params, B: 1, sumSq: undefined, sumS: undefined };
+    const base = {
+        ...params, B: 1, tp_size: 1, dp_size: 1,
+        sumSq: undefined, sumS: undefined,
+    };
     const p1 = { ...base, S: effS, S_q: sqLo };
     const p2 = { ...base, S: effS, S_q: sqHi };
     const dSq = sqHi - sqLo;
@@ -771,10 +777,10 @@ function computeMlaCrossover(params) {
         addFlashAttnAnnotations(g_ab1, p1);
         addFlashAttnAnnotations(g_ab2, p2);
     }
-    const upproj1 = computePipelineTotals(g_up1);
-    const upproj2 = computePipelineTotals(g_up2);
-    const absorbed1 = computePipelineTotals(g_ab1);
-    const absorbed2 = computePipelineTotals(g_ab2);
+    const upproj1 = computePipelineTotals(g_up1, p1);
+    const upproj2 = computePipelineTotals(g_up2, p2);
+    const absorbed1 = computePipelineTotals(g_ab1, p1);
+    const absorbed2 = computePipelineTotals(g_ab2, p2);
 
     // Bytes as a function of S_q: total = slope * S_q + intercept
     const byteSlopeUpproj = (upproj2.totalBytes - upproj1.totalBytes) / dSq;
@@ -858,9 +864,14 @@ function updateStatsOverlay(graphs, labels, crossover) {
     container.html('');
 
     const gpuKeys = Object.keys(GPU_SPECS);
+    let anyFallback = false;
 
     graphs.forEach((graph, i) => {
-        const totals = computePipelineTotals(graph);
+        const totals = computePipelineTotals(graph, params);
+        const referenceEstimate = computePipelineRoofline(totals, 'H100 SXM');
+        const displayTotals = totals.rankTotals
+            ? totals.rankTotals.find(rank => rank.dpRank === referenceEstimate.dpRank) || totals
+            : totals;
 
         if (labels && labels[i]) {
             container.append('div')
@@ -871,7 +882,16 @@ function updateStatsOverlay(graphs, labels, crossover) {
                 .text(labels[i]);
         }
 
-        // Totals row
+        const scope = totals.scope !== 'single GPU'
+            ? `Critical-rank work${totals.dpSize > 1 ? ' (H100 reference)' : ''} · TP=${totals.tpSize} · DP=${totals.dpSize}`
+            : 'Single-GPU work';
+        container.append('div')
+            .style('font-size', '9px')
+            .style('color', '#666')
+            .style('margin-bottom', '3px')
+            .text(scope);
+
+        // Critical-rank totals row
         const totalsRow = container.append('div')
             .style('display', 'flex')
             .style('gap', '12px')
@@ -879,17 +899,22 @@ function updateStatsOverlay(graphs, labels, crossover) {
             .style('flex-wrap', 'wrap')
             .style('margin-bottom', '8px');
 
-        if (totals.totalFlops > 0) {
+        if (displayTotals.totalFlops > 0) {
             totalsRow.append('span').html(
-                `<span style="color:#888">FLOPs:</span> <span style="color:#7c8cf8;font-weight:600">${fmtNum(totals.totalFlops)}</span>`
+                `<span style="color:#888">FLOPs:</span> <span style="color:#7c8cf8;font-weight:600">${fmtNum(displayTotals.totalFlops)}</span>`
             );
         }
         totalsRow.append('span').html(
-            `<span style="color:#888">Read:</span> <span style="color:#aaa">${fmtBytes(totals.totalReadBytes)}</span>`
+            `<span style="color:#888">Read:</span> <span style="color:#aaa">${fmtBytes(displayTotals.totalReadBytes)}</span>`
         );
         totalsRow.append('span').html(
-            `<span style="color:#888">Write:</span> <span style="color:#aaa">${fmtBytes(totals.totalWriteBytes)}</span>`
+            `<span style="color:#888">Write:</span> <span style="color:#aaa">${fmtBytes(displayTotals.totalWriteBytes)}</span>`
         );
+        if (displayTotals.totalCommunicationBytes > 0) {
+            totalsRow.append('span').html(
+                `<span style="color:#888">Collective:</span> <span style="color:#aaa">${fmtBytes(displayTotals.totalCommunicationBytes)}</span>`
+            );
+        }
 
         // GPU table
         const table = container.append('table')
@@ -900,32 +925,44 @@ function updateStatsOverlay(graphs, labels, crossover) {
         // Header
         const thead = table.append('tr');
         thead.append('td').style('color', '#666').style('padding', '2px 6px 2px 0').text('GPU');
-        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Compute');
-        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Memory');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Σ compute');
+        thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Σ HBM');
+        if (displayTotals.totalCommunicationBytes > 0) {
+            thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Comm');
+        }
         thead.append('td').style('color', '#666').style('padding', '2px 6px').style('text-align', 'right').text('Bound');
-        thead.append('td').style('color', '#666').style('padding', '2px 0 2px 6px').style('text-align', 'right').text('Time');
+        thead.append('td').style('color', '#666').style('padding', '2px 0 2px 6px').style('text-align', 'right').text('Ideal ≥');
 
         for (const key of gpuKeys) {
-            const gpu = GPU_SPECS[key];
-            const computeTime = totals.totalFlops > 0 ? totals.totalFlops / (gpu.peakTFLOPS_bf16 * 1e12) : 0;
-            const memTime = totals.totalBytes / (gpu.bandwidthTBs * 1e12);
-            const bottleneck = totals.totalFlops === 0 ? 'MEM'
-                : computeTime >= memTime ? 'COMPUTE' : 'MEM';
-            const bottleneckTime = Math.max(computeTime, memTime);
-            const bnColor = bottleneck === 'COMPUTE' ? '#2ecc71' : '#e74c3c';
+            const estimate = computePipelineRoofline(totals, key);
+            anyFallback ||= estimate.usedFallback;
+            const bnColor = estimate.bound === 'COMPUTE' ? '#2ecc71'
+                : estimate.bound === 'MIXED' ? '#f39c12' : '#e74c3c';
 
             const row = table.append('tr');
-            row.append('td').style('color', '#bbb').style('padding', '2px 6px 2px 0').style('font-weight', '500').text(key);
+            const gpuCell = row.append('td').style('padding', '2px 6px 2px 0').style('font-weight', '500');
+            gpuCell.append('a')
+                .attr('href', GPU_SPECS[key].sourceUrl)
+                .attr('target', '_blank')
+                .attr('rel', 'noopener noreferrer')
+                .style('color', '#bbb')
+                .style('text-decoration', 'none')
+                .attr('title', `${GPU_SPECS[key].label} peak specifications`)
+                .text(key + (estimate.usedFallback ? '†' : ''));
             row.append('td').style('color', '#aaa').style('padding', '2px 6px').style('text-align', 'right')
-                .text(computeTime > 0 ? fmtTime(computeTime) : '\u2014');
+                .text(estimate.computeTime > 0 ? fmtTime(estimate.computeTime) : '\u2014');
             row.append('td').style('color', '#aaa').style('padding', '2px 6px').style('text-align', 'right')
-                .text(fmtTime(memTime));
+                .text(fmtTime(estimate.memoryTime));
+            if (displayTotals.totalCommunicationBytes > 0) {
+                row.append('td').style('color', '#aaa').style('padding', '2px 6px').style('text-align', 'right')
+                    .text(fmtTime(estimate.communicationTime));
+            }
             row.append('td').style('padding', '2px 6px').style('text-align', 'right')
                 .style('color', bnColor).style('font-weight', '600')
-                .text(bottleneck);
+                .text(estimate.bound);
             row.append('td').style('color', '#7c8cf8').style('padding', '2px 0 2px 6px').style('text-align', 'right')
                 .style('font-weight', '600')
-                .text(fmtTime(bottleneckTime));
+                .text(fmtTime(estimate.lowerBoundTime));
         }
 
         if (i < graphs.length - 1) {
@@ -934,6 +971,17 @@ function updateStatsOverlay(graphs, labels, crossover) {
                 .style('margin', '8px 0');
         }
     });
+
+    container.append('div')
+        .style('border-top', '1px solid #2a2d3a')
+        .style('margin-top', '7px')
+        .style('padding-top', '5px')
+        .style('font-size', '9px')
+        .style('line-height', '1.35')
+        .style('color', '#666')
+        .text('Ideal lower bound = Σ max(op compute, op HBM) + serialized TP ring all-reduce. Uses dense BF16/FP8 and peak HBM/NVLink rates; excludes launch, occupancy, contention, and synchronization overhead.' +
+            (anyFallback ? ' †A100 FP8 math uses its BF16 peak as a fallback bound.' : '') +
+            ` Specs accessed ${GPU_SPEC_AS_OF}.`);
 
     // Show crossover analysis for MLA dual-graph view
     if (crossover != null && graphs.length === 2) {
@@ -1044,6 +1092,14 @@ function updateStatsOverlay(graphs, labels, crossover) {
 // --- Update ---
 
 function annotateGraph(graph) {
+    // Broadcast/view tensors are logical expansions. Consumers read the compact
+    // source storage (for example n_kv KV heads), not a materialized n_h copy.
+    const tensorMap = Object.fromEntries(graph.tensors.map(t => [t.id, t]));
+    for (const op of graph.ops) {
+        if (op.type === 'broadcast' && op.inputs.length === 1 && tensorMap[op.output]) {
+            tensorMap[op.output].storageAliasId = op.inputs[0];
+        }
+    }
     if (params.B > 1) addMultiRequestAnnotations(graph, params);
     if (params.tp_size > 1) addTpAnnotations(graph, params);
     if (params.dp_size > 1) addDpAnnotations(graph, params);
@@ -1176,6 +1232,8 @@ function renderMlaStacked() {
 
 function addTpAnnotations(graph, params) {
     const tp = params.tp_size;
+    const gcd = (a, b) => b ? gcd(b, a % b) : a;
+    const kvTp = Math.max(1, gcd(tp, params.n_kv || 1));
     const tensorMap = {};
     for (const t of graph.tensors) tensorMap[t.id] = t;
 
@@ -1186,7 +1244,7 @@ function addTpAnnotations(graph, params) {
         }
         if (t.dimNames && t.dimNames.includes('n_kv')) {
             t.tpSharded = 'n_kv';
-            t.tpSize = tp;
+            t.tpSize = kvTp;
         }
     }
 
@@ -1217,18 +1275,22 @@ function addTpAnnotations(graph, params) {
                     (directOut.dimNames.includes('n_h') || directOut.dimNames.includes('n_kv'));
 
                 let nextHasHeads = false;
+                let headTensor = directHasHeads ? directOut : null;
                 if (!directHasHeads) {
-                    nextHasHeads = graph.ops.some(o =>
+                    const nextOp = graph.ops.find(o =>
                         o.inputs.includes(op.output) && tensorMap[o.output] &&
                         tensorMap[o.output].dimNames &&
                         (tensorMap[o.output].dimNames.includes('n_h') ||
                          tensorMap[o.output].dimNames.includes('n_kv'))
                     );
+                    nextHasHeads = !!nextOp;
+                    if (nextOp) headTensor = tensorMap[nextOp.output];
                 }
 
-                if ((directHasHeads || nextHasHeads) && t.shape[1] % tp === 0) {
+                const effectiveTp = headTensor?.tpSize || tp;
+                if ((directHasHeads || nextHasHeads) && effectiveTp > 1 && t.shape[1] % effectiveTp === 0) {
                     t.tpSharded = true;
-                    t.tpSize = tp;
+                    t.tpSize = effectiveTp;
                     t.tpDim = 1;
                 }
             }
@@ -1248,7 +1310,7 @@ function addTpAnnotations(graph, params) {
             const out = tensorMap[op.output];
             if (out && out.shape.length === 2 && !out.tpSharded) {
                 out.tpSharded = true;
-                out.tpSize = tp;
+                out.tpSize = weightInput.tpSize || tp;
                 out.tpDim = 1;
             }
         } else if (weightInput.tpDim === 0) {
@@ -1257,7 +1319,7 @@ function addTpAnnotations(graph, params) {
                 const t = tensorMap[inputId];
                 if (t && t.type !== 'weight' && t.shape.length === 2 && !t.tpSharded) {
                     t.tpSharded = true;
-                    t.tpSize = tp;
+                    t.tpSize = weightInput.tpSize || tp;
                     t.tpDim = 1;
                 }
             }
@@ -1273,11 +1335,11 @@ function addTpAnnotations(graph, params) {
 
         if (inT.tpSharded && !outT.tpSharded && outT.shape.length === 2) {
             outT.tpSharded = true;
-            outT.tpSize = tp;
+            outT.tpSize = inT.tpSize || tp;
             outT.tpDim = 1;
         } else if (outT.tpSharded && !inT.tpSharded && inT.shape.length === 2) {
             inT.tpSharded = true;
-            inT.tpSize = tp;
+            inT.tpSize = outT.tpSize || tp;
             inT.tpDim = 1;
         }
     }
@@ -1400,6 +1462,7 @@ function addFlashAttnAnnotations(graph, params) {
     const fusedOp = {
         id: 'flash_attn',
         type: 'flash_attn',
+        graphId: graph.id,
         inputs: externalInputs,
         output: finalOutputId,
         label: 'FlashAttn',

@@ -69,15 +69,15 @@ function _renderOpDetail(op, graph, params) {
 
     // Build description + cost HTML (flash_attn shows its own cost in the detail panel)
     let descHtml = op.desc || '';
-    const cost = isFlash ? null : computeOpCost(op, tensorMap);
+    const cost = isFlash ? null : computeOpCost(op, tensorMap, { ...params, graphId: graph.id });
     if (cost && (cost.flops > 0 || cost.readBytes > 0)) {
         const totalBytes = cost.readBytes + cost.writeBytes;
         const ai = cost.arithmeticIntensity;
         // The stats overlay reports every GPU, so name them here too rather than
         // silently judging the regime against one hardcoded device
         const gpuKeys = Object.keys(GPU_SPECS);
-        const computeBound = gpuKeys.filter(k => ai >= computeRooflineThreshold(k));
-        const memoryBound = gpuKeys.filter(k => ai < computeRooflineThreshold(k));
+        const computeBound = gpuKeys.filter(k => ai >= computeRooflineThreshold(k, cost.computeDtype));
+        const memoryBound = gpuKeys.filter(k => ai < computeRooflineThreshold(k, cost.computeDtype));
         const regime = cost.flops === 0 ? 'MEMORY-ONLY'
             : memoryBound.length === 0 ? 'COMPUTE-BOUND'
             : computeBound.length === 0 ? 'MEMORY-BOUND' : 'MIXED';
@@ -87,6 +87,9 @@ function _renderOpDetail(op, graph, params) {
 
         descHtml += `<div style="margin-top:12px;padding:10px 12px;background:#1a1d2a;border-radius:6px;border:1px solid #2a2d3a;font-size:11px;line-height:1.8">`;
         descHtml += `<div style="font-weight:600;color:#bbb;margin-bottom:4px;font-size:12px">Cost Analysis</div>`;
+        if ((params.tp_size || 1) > 1 || (params.dp_size || 1) > 1) {
+            descHtml += `<div style="color:#666;font-size:10px">Critical-rank work (TP=${params.tp_size || 1}, effective DP=${Math.min(params.dp_size || 1, params.B || 1)})</div>`;
+        }
 
         if (cost.flops > 0) {
             descHtml += `<div><span style="color:#888">FLOPs:</span> <span style="color:#7c8cf8;font-weight:600">${fmtNum(cost.flops)}</span></div>`;
@@ -96,11 +99,12 @@ function _renderOpDetail(op, graph, params) {
         for (const item of cost.breakdown) {
             if (item.bytes > 0) {
                 const shapeStr = item.shape ? ` [${item.shape.join('×')}]` : '';
-                // Derive bytes/element from the breakdown itself (fp8=1, bf16=2, int32=4, mask=1)
-                const perEl = item.shape ? item.bytes / tensorElements(item.shape) : 0;
-                const perElStr = item.shape && perEl > 0 ? ` × ${perEl}B` : '';
+                const perElStr = item.bytesPerEl ? ` × ${item.bytesPerEl}B` : '';
                 descHtml += `<div><span style="color:#888">${item.label}:</span> <span style="color:#aaa">${fmtBytes(item.bytes)}</span><span style="color:#555;font-size:10px">${shapeStr}${perElStr}</span></div>`;
             }
+        }
+        if (cost.communicationBytes > 0) {
+            descHtml += `<div><span style="color:#888">TP ring traffic:</span> <span style="color:#aaa">${fmtBytes(cost.communicationBytes)}</span></div>`;
         }
 
         descHtml += `<div style="margin-top:4px;border-top:1px solid #2a2d3a;padding-top:4px">`;
@@ -111,7 +115,7 @@ function _renderOpDetail(op, graph, params) {
         descHtml += `</div>`;
         // Thresholds are not monotonic in device order (B200's is below H100's),
         // so take the actual extremes
-        const thresholds = gpuKeys.map(computeRooflineThreshold);
+        const thresholds = gpuKeys.map(k => computeRooflineThreshold(k, cost.computeDtype));
         let regimeNote;
         if (cost.flops === 0) {
             regimeNote = 'no math — bandwidth only';

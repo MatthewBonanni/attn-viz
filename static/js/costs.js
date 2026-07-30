@@ -30,17 +30,254 @@ export function tensorBytes(shape, bytesPerEl = BYTES_BF16) {
     return tensorElements(shape) * bytesPerEl;
 }
 
-// Compute cost for an operation
-// Returns { flops, readBytes, writeBytes, arithmeticIntensity }
-export function computeOpCost(op, tensorMap) {
+function normalizedWorkload(params = {}) {
+    const B = Math.max(1, params.B || 1);
+    let queryLens;
+    let seqLens;
+    if (B === 1) {
+        const s = Math.max(1, params.S || params.sumS || 1);
+        seqLens = [s];
+        queryLens = [Math.max(1, Math.min(s, params.S_q || params.sumSq || s))];
+    } else {
+        seqLens = (params.seqLens || Array(B).fill(params.S || 1))
+            .slice(0, B).map(v => Math.max(1, v));
+        queryLens = (params.queryLens || Array(B).fill(params.S_q || params.S || 1))
+            .slice(0, B).map((v, i) => Math.max(1, Math.min(seqLens[i], v)));
+    }
+    return {
+        B,
+        queryLens,
+        seqLens,
+        windowSize: params.slidingWindow ? Math.max(1, params.window_size || 1) : null,
+        topk: Math.max(1, params.topk || 2048),
+        tpSize: Math.max(1, params.tp_size || 1),
+        dpSize: Math.max(1, Math.min(params.dp_size || 1, B)),
+        dpRank: Number.isInteger(params.dpRank) ? params.dpRank : null,
+    };
+}
+
+function sum(values) {
+    return values.reduce((a, b) => a + b, 0);
+}
+
+function queryPairCount(s, q, limit) {
+    if (limit == null) return q * s;
+    let pairs = 0;
+    const firstQueryPos = s - q;
+    for (let i = 0; i < q; i++) {
+        pairs += Math.min(limit, firstQueryPos + i + 1);
+    }
+    return pairs;
+}
+
+export function computeAttentionPairs(params = {}) {
+    const w = normalizedWorkload(params);
+    return sum(w.seqLens.map((s, i) => queryPairCount(s, w.queryLens[i], w.windowSize)));
+}
+
+export function computeDensePairs(params = {}) {
+    const w = normalizedWorkload(params);
+    return sum(w.seqLens.map((s, i) => s * w.queryLens[i]));
+}
+
+export function computeSparsePairs(params = {}) {
+    const w = normalizedWorkload(params);
+    return sum(w.seqLens.map((s, i) => queryPairCount(s, w.queryLens[i], w.topk)));
+}
+
+function perRequestWork(kind, params) {
+    const w = normalizedWorkload(params);
+    if (kind === 'q') return w.queryLens;
+    if (kind === 's') return w.seqLens;
+    if (kind === 'dense') return w.seqLens.map((s, i) => s * w.queryLens[i]);
+    if (kind === 'sparse') {
+        return w.seqLens.map((s, i) => queryPairCount(s, w.queryLens[i], w.topk));
+    }
+    if (kind === 'attention') {
+        return w.seqLens.map((s, i) => queryPairCount(s, w.queryLens[i], w.windowSize));
+    }
+    return null;
+}
+
+function rankLoads(values, dpSize) {
+    const loads = Array(dpSize).fill(0);
+    for (let i = 0; i < values.length; i++) {
+        const rank = Math.min(dpSize - 1, Math.floor(i * dpSize / values.length));
+        loads[rank] += values[i];
+    }
+    return loads;
+}
+
+function selectedRankWork(values, workload) {
+    if (!values || workload.dpSize <= 1) return sum(values || []);
+    const loads = rankLoads(values, workload.dpSize);
+    return workload.dpRank == null
+        ? Math.max(...loads)
+        : loads[Math.min(workload.dpSize - 1, workload.dpRank)];
+}
+
+function normalizedDimName(name) {
+    return String(name || '').replace(/^\u03a3/, '');
+}
+
+function tensorWorkKind(tensor, context) {
+    const names = (tensor.dimNames || []).map(normalizedDimName);
+    const hasQ = names.includes('S_q');
+    const hasS = names.includes('S');
+    const hasK = names.includes('k');
+    if (hasQ && hasS) return context.graphId === 'dsa' ? 'dense' : 'attention';
+    if (hasQ && hasK) return 'sparse';
+    if (hasQ) return 'q';
+    if (hasS) return 's';
+    return null;
+}
+
+function tensorOtherDimProduct(tensor, kind) {
+    const names = (tensor.dimNames || []).map(normalizedDimName);
+    const excluded = kind === 'sparse' ? new Set(['S_q', 'k'])
+        : kind === 'dense' || kind === 'attention' ? new Set(['S_q', 'S'])
+        : kind === 'q' ? new Set(['S_q'])
+        : kind === 's' ? new Set(['S']) : new Set();
+    return tensor.shape.reduce((product, dim, i) =>
+        product * (excluded.has(names[i]) ? 1 : dim), 1);
+}
+
+function hasWorkloadContext(context) {
+    return context && (context.S != null || context.sumS != null || context.seqLens != null);
+}
+
+function tensorElementInfo(tensor, context = {}, { windowedCache = false } = {}) {
+    const kind = hasWorkloadContext(context) ? tensorWorkKind(tensor, context) : null;
+    const w = normalizedWorkload(context);
+    let values = kind ? perRequestWork(kind, context) : null;
+    const otherDims = kind ? tensorOtherDimProduct(tensor, kind) : 1;
+
+    if (windowedCache && w.windowSize && kind === 's') {
+        // The union of keys touched by the last q queries spans at most W+q-1 keys.
+        values = w.seqLens.map((s, i) => Math.min(s, w.windowSize + w.queryLens[i] - 1));
+    }
+
+    let elements;
+    if (values) {
+        elements = selectedRankWork(values, w) * otherDims;
+    } else {
+        elements = tensorElements(tensor.shape);
+    }
+
+    if (tensor.tpSharded && w.tpSize > 1) {
+        elements /= Math.max(1, Math.min(w.tpSize, tensor.tpSize || w.tpSize));
+    }
+    return { elements, kind };
+}
+
+function tensorByteWidth(tensor) {
+    return tensor.bytesPerEl || BYTES_BF16;
+}
+
+function tensorTransfer(tensor, context, options = {}) {
+    const { elements } = tensorElementInfo(tensor, context, options);
+    const bytesPerEl = options.bytesPerEl || tensorByteWidth(tensor);
+    return { elements, bytesPerEl, bytes: elements * bytesPerEl };
+}
+
+function transferItem(label, tensor, context, options = {}) {
+    const transfer = tensorTransfer(tensor, context, options);
+    return { label, shape: tensor.shape, ...transfer };
+}
+
+function hbmTransferItem(label, tensor, context, options = {}) {
+    const item = transferItem(label, tensor, context, options);
+    if (tensor.sramOnly) item.bytes = 0;
+    return item;
+}
+
+function opTpFactor(op, inputs, output, context) {
+    const globalTp = normalizedWorkload(context).tpSize;
+    if (globalTp <= 1) return 1;
+    return [...inputs, output]
+        .filter(t => t && t.tpSharded)
+        .reduce((factor, t) => Math.max(
+            factor,
+            Math.min(globalTp, t.tpSize || globalTp),
+        ), 1);
+}
+
+function opDpFraction(op, inputs, output, context) {
+    const w = normalizedWorkload(context);
+    if (w.dpSize <= 1) return 1;
+    const tensors = [output, ...inputs].filter(t => t && t.type !== 'weight');
+    const kind = tensors.map(t => tensorWorkKind(t, context)).find(Boolean) || 'q';
+    const values = perRequestWork(kind, context);
+    const total = sum(values);
+    return total > 0 ? selectedRankWork(values, w) / total : 1;
+}
+
+function opWorkKind(inputs, output, context) {
+    const kinds = [output, ...inputs]
+        .filter(t => t && t.type !== 'weight')
+        .map(t => tensorWorkKind(t, context))
+        .filter(Boolean);
+    return ['attention', 'dense', 'sparse', 'q', 's'].find(kind => kinds.includes(kind)) || 'q';
+}
+
+function criticalDpRank(kind, context) {
+    const w = normalizedWorkload(context);
+    if (w.dpSize <= 1) return 0;
+    const loads = rankLoads(perRequestWork(kind, context), w.dpSize);
+    return loads.indexOf(Math.max(...loads));
+}
+
+function inferComputeDtype(op, inputs) {
+    if (['matmul', 'compress', 'decompress'].includes(op.type) &&
+        inputs.length >= 2 && inputs[0].bytesPerEl === 1 && inputs[1].bytesPerEl === 1) {
+        return 'fp8';
+    }
+    return 'bf16';
+}
+
+// Compute critical-rank cost for an operation. Tensor shapes remain the visual
+// packed-batch shapes; context supplies the exact per-request workload.
+export function computeOpCost(op, tensorMap, context = {}) {
     const output = tensorMap[op.output];
     if (!output) return null;
 
     const inputs = op.inputs.map(id => tensorMap[id]).filter(Boolean);
-    // Bytes for a tensor, honoring per-tensor dtype (e.g. FP8 indexer, int32 indices)
-    const tBytes = (t) => tensorBytes(t.shape, t.bytesPerEl);
-    // SRAM-only tensors (FlashAttention) have zero HBM transfer
-    const outBytes = output.sramOnly ? 0 : tBytes(output);
+    if (normalizedWorkload(context).dpSize > 1 && normalizedWorkload(context).dpRank == null) {
+        context = { ...context, dpRank: criticalDpRank(opWorkKind(inputs, output, context), context) };
+    }
+    const computeDtype = inferComputeDtype(op, inputs);
+
+    function finish(flops, breakdown, communicationBytes = 0) {
+        const readBytes = breakdown
+            .filter(item => item.direction !== 'write')
+            .reduce((total, item) => total + item.bytes, 0);
+        const writeBytes = breakdown
+            .filter(item => item.direction === 'write')
+            .reduce((total, item) => total + item.bytes, 0);
+        const totalIO = readBytes + writeBytes;
+        return {
+            flops,
+            readBytes,
+            writeBytes,
+            communicationBytes,
+            arithmeticIntensity: totalIO > 0 ? flops / totalIO : (flops > 0 ? Infinity : 0),
+            computeDtype,
+            breakdown,
+        };
+    }
+
+    function readItem(tensor, options = {}) {
+        const storageTensor = tensor.storageAliasId
+            ? tensorMap[tensor.storageAliasId] || tensor : tensor;
+        return {
+            ...hbmTransferItem(`Read ${storageTensor.label}`, storageTensor, context, options),
+            direction: 'read',
+        };
+    }
+
+    function writeItem(tensor, options = {}) {
+        return { ...hbmTransferItem(`Write ${tensor.label}`, tensor, context, options), direction: 'write' };
+    }
 
     switch (op.type) {
         case 'matmul':
@@ -51,105 +288,71 @@ export function computeOpCost(op, tensorMap) {
             if (!A || !B) return null;
 
             const shA = A.shape;
-            const shB = B.shape;
             const shC = output.shape;
 
-            // Inner dimension (contraction)
             const K = shA[shA.length - 1];
-            // Output dimensions
             const M = shA.length >= 2 ? shA[shA.length - 2] : 1;
             const N = shC[shC.length - 1];
-            // Batch dimensions from output
             const batchDims = shC.length > 2 ? shC.slice(0, -2) : [];
             const batchSize = batchDims.reduce((a, b) => a * b, 1);
+            const outputKind = tensorWorkKind(output, context);
+            const aKind = tensorWorkKind(A, context);
+            let flops;
+            if (['dense', 'attention', 'sparse'].includes(outputKind)) {
+                flops = 2 * tensorElementInfo(output, context).elements * K;
+            } else if (['dense', 'attention', 'sparse'].includes(aKind)) {
+                flops = 2 * tensorElementInfo(A, context).elements * N;
+            } else {
+                flops = 2 * batchSize * M * K * N;
+                flops *= opDpFraction(op, inputs, output, context);
+                flops /= opTpFactor(op, inputs, output, context);
+            }
 
-            const flops = 2 * batchSize * M * K * N;
-            const readA = A.sramOnly ? 0 : tBytes(A);
-            const readB = B.sramOnly ? 0 : tBytes(B);
-            const readBytes = readA + readB;
-            const writeBytes = outBytes;
-
-            const totalIO = readBytes + writeBytes;
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    { label: `Read ${A.label}`, shape: shA, bytes: readA },
-                    { label: `Read ${B.label}`, shape: shB, bytes: readB },
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            const windowedAttention = context.slidingWindow &&
+                (outputKind === 'attention' || aKind === 'attention');
+            const breakdown = [
+                readItem(A, { windowedCache: windowedAttention && tensorWorkKind(A, context) === 's' }),
+                readItem(B, { windowedCache: windowedAttention && tensorWorkKind(B, context) === 's' }),
+                writeItem(output),
+            ];
+            let communicationBytes = 0;
+            if (op.tpAllReduce && normalizedWorkload(context).tpSize > 1) {
+                const tp = normalizedWorkload(context).tpSize;
+                const messageBytes = tensorTransfer(output, context).bytes;
+                communicationBytes = 2 * (tp - 1) / tp * messageBytes;
+            }
+            return finish(flops, breakdown, communicationBytes);
         }
 
         case 'mask': {
             // Mask + softmax: ~5 FLOPs per element (mask compare, exp, sum, div, multiply)
-            const elements = tensorElements(output.shape);
+            const elements = tensorElementInfo(output, context).elements;
             const flops = 5 * elements;
-            // Read scores + mask, write attention weights
-            const scoreBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
-            const maskBytes = (inputs[1] && !inputs[1].sramOnly) ? tensorElements(inputs[1].shape) * 1 : 0;
-            const readBytes = scoreBytes + maskBytes;
-            const writeBytes = outBytes;
-
-            const totalIO = readBytes + writeBytes;
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    { label: `Read ${inputs[0]?.label || 'scores'}`, shape: inputs[0]?.shape, bytes: scoreBytes },
-                    { label: `Read ${inputs[1]?.label || 'mask'}`, shape: inputs[1]?.shape, bytes: maskBytes },
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            const breakdown = [];
+            if (inputs[0]) breakdown.push(readItem(inputs[0]));
+            // The causal/window mask is generated from positions in the kernel.
+            breakdown.push(writeItem(output));
+            return finish(flops, breakdown);
         }
 
         case 'rope': {
             // RoPE: 6 FLOPs per pair of dimensions (sin, cos, 2 multiplies, 1 add, 1 sub)
             // = 3 FLOPs per element (each pair covers 2 elements)
-            const elements = tensorElements(output.shape);
+            const elements = tensorElementInfo(output, context).elements;
             const flops = 3 * elements;
-            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
-            const writeBytes = outBytes;
-
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: (readBytes + writeBytes) > 0 ? flops / (readBytes + writeBytes) : Infinity,
-                breakdown: [
-                    { label: `Read ${inputs[0]?.label || 'input'}`, shape: inputs[0]?.shape, bytes: readBytes },
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            return finish(flops, [readItem(inputs[0]), writeItem(output)]);
         }
 
         case 'add': {
-            const elements = tensorElements(output.shape);
+            const elements = tensorElementInfo(output, context).elements;
             const flops = elements;
-            const readBytes = inputs.reduce((sum, t) => sum + (t.sramOnly ? 0 : tBytes(t)), 0);
-            const writeBytes = outBytes;
-            const totalIO = readBytes + writeBytes;
-
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    ...inputs.map(t => ({ label: `Read ${t.label}`, shape: t.shape, bytes: t.sramOnly ? 0 : tBytes(t) })),
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
         }
 
         case 'broadcast':
         case 'reshape': {
             // Logical operation, no FLOPs or real memory transfer
-            return { flops: 0, readBytes: 0, writeBytes: 0, arithmeticIntensity: 0, breakdown: [] };
+            return finish(0, []);
         }
 
         case 'flash_attn': {
@@ -163,85 +366,48 @@ export function computeOpCost(op, tensorMap) {
             // Shapes: Q is [n_h, S_q, d] (3D) or [S_q, d] (2D), K is [n_h, S, d] or [S, d]
             const shQ = Q.shape;
             const n_h = shQ.length >= 3 ? shQ[0] : 1;
-            const S_q = shQ.length >= 3 ? shQ[1] : shQ[0];
-            const d = shQ[shQ.length - 1];
-
-            // K determines S and inner dim for QK^T
             const shK = K ? K.shape : shQ;
-            const S = shK.length >= 3 ? shK[1] : shK[0];
             const d_k = shK[shK.length - 1];
 
             // V may be different tensor (or same as K for absorbed MLA)
             const actualV = (V && V.id !== K.id) ? V : K;
             const d_v = actualV.shape[actualV.shape.length - 1];
 
-            // FLOPs: 2*n_h*S_q*S*d_k (QK^T) + 5*n_h*S_q*S (mask+softmax) + 2*n_h*S_q*S*d_v (Attn@V)
-            // Note: S_q and S are sumSq/sumS when B > 1, so total work across all requests is captured
-            const flops = n_h * S_q * S * (2 * d_k + 5 + 2 * d_v);
+            const qHeads = Q.tpSharded && normalizedWorkload(context).tpSize > 1
+                ? n_h / normalizedWorkload(context).tpSize : n_h;
+            const pairValues = perRequestWork('attention', context);
+            const localPairs = selectedRankWork(pairValues, normalizedWorkload(context));
+            const flops = qHeads * localPairs * (2 * d_k + 5 + 2 * d_v);
 
             // Memory: read all non-mask inputs from HBM; write O to HBM
-            const maskInput = inputs.find(t => t && t.type === 'mask');
             const breakdown = [];
-            let readBytes = 0;
             const counted = new Set();
             for (const t of inputs) {
                 if (!t || t.type === 'mask' || counted.has(t.id)) continue;
                 counted.add(t.id);
-                const bytes = tBytes(t);
-                readBytes += bytes;
-                breakdown.push({ label: `Read ${t.label}`, shape: t.shape, bytes });
+                breakdown.push(readItem(t, {
+                    windowedCache: context.slidingWindow && tensorWorkKind(t, context) === 's',
+                }));
             }
-            if (maskInput) {
-                const maskBytes = tensorElements(maskInput.shape) * 1;
-                readBytes += maskBytes;
-                breakdown.push({ label: `Read ${maskInput.label}`, shape: maskInput.shape, bytes: maskBytes });
-            }
-            const writeBytes = outBytes;
-            breakdown.push({ label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes });
-
-            const totalIO = readBytes + writeBytes;
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown,
-            };
+            // Causal/window masks are generated in-kernel and never read from HBM.
+            breakdown.push(writeItem(output));
+            return finish(flops, breakdown);
         }
 
         case 'cache': {
             // Append to cache: copy S_q new tokens (at the cache's dtype, e.g. FP8 indexer keys)
-            const inputBytes = inputs[0] ? tensorBytes(inputs[0].shape, output.bytesPerEl) : 0;
-            return {
-                flops: 0,
-                readBytes: inputBytes,
-                writeBytes: inputBytes,
-                arithmeticIntensity: 0,
-                breakdown: [
-                    { label: `Read new tokens`, shape: inputs[0]?.shape, bytes: inputBytes },
-                    { label: `Write to cache`, shape: inputs[0]?.shape, bytes: inputBytes },
-                ],
-            };
+            if (!inputs[0]) return null;
+            const source = transferItem('Read new tokens', inputs[0], context, { bytesPerEl: tensorByteWidth(output) });
+            const target = { ...source, label: 'Write to cache', direction: 'write' };
+            source.direction = 'read';
+            return finish(0, [source, target]);
         }
 
         case 'softmax': {
             // Standalone row-wise softmax (no mask): exp, sum, div, max-subtract ≈ 4 FLOPs/element
-            const elements = tensorElements(output.shape);
+            const elements = tensorElementInfo(output, context).elements;
             const flops = 4 * elements;
-            const readBytes = (inputs[0] && !inputs[0].sramOnly) ? tBytes(inputs[0]) : 0;
-            const writeBytes = outBytes;
-            const totalIO = readBytes + writeBytes;
-
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    { label: `Read ${inputs[0]?.label || 'scores'}`, shape: inputs[0]?.shape, bytes: readBytes },
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            return finish(flops, [readItem(inputs[0]), writeItem(output)]);
         }
 
         case 'relu_wsum': {
@@ -250,49 +416,19 @@ export function computeOpCost(op, tensorMap) {
             const scores = inputs[0];
             const weights = inputs[1];
             if (!scores) return null;
-            const flops = 3 * tensorElements(scores.shape);
-            const readScores = scores.sramOnly ? 0 : tBytes(scores);
-            const readWeights = (weights && !weights.sramOnly) ? tBytes(weights) : 0;
-            const readBytes = readScores + readWeights;
-            const writeBytes = outBytes;
-            const totalIO = readBytes + writeBytes;
-
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    { label: `Read ${scores.label}`, shape: scores.shape, bytes: readScores },
-                    ...(weights ? [{ label: `Read ${weights.label}`, shape: weights.shape, bytes: readWeights }] : []),
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            const flops = 3 * tensorElementInfo(scores, context).elements;
+            return finish(flops, [readItem(scores), ...(weights ? [readItem(weights)] : []), writeItem(output)]);
         }
 
         case 'topk': {
             // Top-k selection per query row: one comparison pass over all logits
             const logits = inputs[0];
-            const maskInput = inputs[1];
             if (!logits) return null;
-            const flops = tensorElements(logits.shape);
-            const readLogits = logits.sramOnly ? 0 : tBytes(logits);
-            const readMask = maskInput ? tensorElements(maskInput.shape) * 1 : 0;
-            const readBytes = readLogits + readMask;
-            const writeBytes = outBytes; // int32 indices via bytesPerEl
-            const totalIO = readBytes + writeBytes;
-
-            return {
-                flops,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: totalIO > 0 ? flops / totalIO : Infinity,
-                breakdown: [
-                    { label: `Read ${logits.label}`, shape: logits.shape, bytes: readLogits },
-                    ...(maskInput ? [{ label: `Read ${maskInput.label}`, shape: maskInput.shape, bytes: readMask }] : []),
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            const flops = tensorElementInfo(logits, context).elements;
+            return finish(flops, [
+                readItem(logits),
+                writeItem(output),
+            ]);
         }
 
         case 'gather': {
@@ -302,22 +438,12 @@ export function computeOpCost(op, tensorMap) {
             const idx = inputs[0];
             const src = inputs[1];
             if (!src) return null;
-            const readIdx = idx ? tBytes(idx) : 0;
-            const readSrc = tensorBytes(output.shape, src.bytesPerEl);
-            const readBytes = readIdx + readSrc;
-            const writeBytes = outBytes; // 0 when sramOnly
-
-            return {
-                flops: 0,
-                readBytes,
-                writeBytes,
-                arithmeticIntensity: 0,
-                breakdown: [
-                    ...(idx ? [{ label: `Read ${idx.label}`, shape: idx.shape, bytes: readIdx }] : []),
-                    { label: `Gather from ${src.label}`, shape: output.shape, bytes: readSrc },
-                    { label: `Write ${output.label}`, shape: output.shape, bytes: writeBytes },
-                ],
-            };
+            const gathered = tensorTransfer(output, context, { bytesPerEl: tensorByteWidth(src) });
+            return finish(0, [
+                ...(idx ? [readItem(idx)] : []),
+                { label: `Gather from ${src.label}`, shape: output.shape, ...gathered, direction: 'read' },
+                writeItem(output),
+            ]);
         }
 
         default:
@@ -325,43 +451,143 @@ export function computeOpCost(op, tensorMap) {
     }
 }
 
-// GPU specs for roofline reference
+// Dense tensor-core peaks and per-GPU interconnect bandwidth. These are ideal
+// hardware limits, not achieved application throughput. Source URLs are shown
+// in the UI so the assumptions stay auditable.
+export const GPU_SPEC_AS_OF = '2026-07-30';
 export const GPU_SPECS = {
-    'A100 SXM': { peakTFLOPS_bf16: 312,  bandwidthTBs: 2.0,  label: 'A100 SXM (80GB)' },
-    'H100 SXM': { peakTFLOPS_bf16: 990,  bandwidthTBs: 3.35, label: 'H100 SXM (80GB)' },
-    'B200':     { peakTFLOPS_bf16: 2250, bandwidthTBs: 7.7,  label: 'B200 (180GB)' },
-    'B300':     { peakTFLOPS_bf16: 3500, bandwidthTBs: 8.0,  label: 'B300 (288GB)' },
+    'A100 SXM': {
+        peakTFLOPS: { bf16: 312, fp8: null }, bandwidthTBs: 2.0, interconnectTBs: 0.6,
+        label: 'A100 SXM (80GB)', sourceUrl: 'https://www.nvidia.com/en-us/data-center/a100/',
+    },
+    'H100 SXM': {
+        peakTFLOPS: { bf16: 990, fp8: 1979 }, bandwidthTBs: 3.35, interconnectTBs: 0.9,
+        label: 'H100 SXM (80GB)', sourceUrl: 'https://www.nvidia.com/en-us/data-center/h100/',
+    },
+    'B200': {
+        peakTFLOPS: { bf16: 2250, fp8: 4500 }, bandwidthTBs: 7.7, interconnectTBs: 1.8,
+        label: 'B200 (180GB)', sourceUrl: 'https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/',
+    },
+    'B300': {
+        peakTFLOPS: { bf16: 3500, fp8: 7000 }, bandwidthTBs: 8.0, interconnectTBs: 1.8,
+        label: 'B300 (288GB)', sourceUrl: 'https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/',
+    },
 };
 
-// Compute pipeline totals for a graph
-export function computePipelineTotals(graph) {
+// Compute critical-rank pipeline totals for a graph. At DP>1, each op uses the
+// busiest rank's request partition; at TP>1, sharded tensors and math are local.
+export function computePipelineTotals(graph, params = {}) {
     const tensorMap = {};
     for (const t of graph.tensors) tensorMap[t.id] = t;
-
-    let totalFlops = 0;
-    let totalReadBytes = 0;
-    let totalWriteBytes = 0;
-    const opCosts = [];
-
     for (const op of graph.ops) {
-        const cost = computeOpCost(op, tensorMap);
-        if (cost) {
-            totalFlops += cost.flops;
-            totalReadBytes += cost.readBytes;
-            totalWriteBytes += cost.writeBytes;
-            opCosts.push({ op, cost });
+        if (op.type === 'broadcast' && op.inputs.length === 1 && tensorMap[op.output]) {
+            tensorMap[op.output].storageAliasId = op.inputs[0];
         }
     }
+    function totalsForContext(context) {
+        let totalFlops = 0;
+        let totalReadBytes = 0;
+        let totalWriteBytes = 0;
+        let totalCommunicationBytes = 0;
+        const opCosts = [];
 
-    const totalBytes = totalReadBytes + totalWriteBytes;
-    const arithmeticIntensity = totalBytes > 0 ? totalFlops / totalBytes : 0;
+        for (const op of graph.ops) {
+            const cost = computeOpCost(op, tensorMap, context);
+            if (cost) {
+                totalFlops += cost.flops;
+                totalReadBytes += cost.readBytes;
+                totalWriteBytes += cost.writeBytes;
+                totalCommunicationBytes += cost.communicationBytes || 0;
+                opCosts.push({ op, cost });
+            }
+        }
 
-    return { totalFlops, totalReadBytes, totalWriteBytes, totalBytes, arithmeticIntensity, opCosts };
+        const totalBytes = totalReadBytes + totalWriteBytes;
+        return {
+            totalFlops,
+            totalReadBytes,
+            totalWriteBytes,
+            totalBytes,
+            totalCommunicationBytes,
+            arithmeticIntensity: totalBytes > 0 ? totalFlops / totalBytes : 0,
+            opCosts,
+        };
+    }
+
+    const w = normalizedWorkload(params);
+    const totals = totalsForContext({ ...params, graphId: graph.id });
+    const rankTotals = w.dpSize > 1
+        ? Array.from({ length: w.dpSize }, (_, dpRank) => ({
+            dpRank,
+            ...totalsForContext({ ...params, graphId: graph.id, dpRank }),
+        }))
+        : null;
+    return {
+        ...totals,
+        rankTotals,
+        tpSize: w.tpSize,
+        dpSize: w.dpSize,
+        scope: w.tpSize > 1 || w.dpSize > 1 ? 'per-op critical rank' : 'single GPU',
+    };
 }
 
 // Arithmetic intensity threshold: ops/byte above which we're compute-bound
-export function computeRooflineThreshold(gpuKey) {
+export function computeRooflineThreshold(gpuKey, dtype = 'bf16') {
     const gpu = GPU_SPECS[gpuKey];
     if (!gpu) return 156; // A100 default
-    return (gpu.peakTFLOPS_bf16 * 1e12) / (gpu.bandwidthTBs * 1e12);
+    const peak = gpu.peakTFLOPS[dtype] || gpu.peakTFLOPS.bf16;
+    return peak / gpu.bandwidthTBs;
+}
+
+export function estimateOpRoofline(cost, gpuKey) {
+    const gpu = GPU_SPECS[gpuKey];
+    if (!gpu) throw new Error(`Unknown GPU: ${gpuKey}`);
+    const requestedDtype = cost.computeDtype || 'bf16';
+    const nativePeak = gpu.peakTFLOPS[requestedDtype];
+    const effectiveDtype = nativePeak ? requestedDtype : 'bf16';
+    const peak = gpu.peakTFLOPS[effectiveDtype];
+    const computeTime = cost.flops > 0 ? cost.flops / (peak * 1e12) : 0;
+    const memoryTime = (cost.readBytes + cost.writeBytes) / (gpu.bandwidthTBs * 1e12);
+    const communicationTime = (cost.communicationBytes || 0) / (gpu.interconnectTBs * 1e12);
+    const kernelTime = Math.max(computeTime, memoryTime);
+    return {
+        computeTime,
+        memoryTime,
+        communicationTime,
+        lowerBoundTime: kernelTime + communicationTime,
+        bound: cost.flops === 0 ? 'MEM' : computeTime >= memoryTime ? 'COMPUTE' : 'MEM',
+        requestedDtype,
+        effectiveDtype,
+        usedFallback: requestedDtype !== effectiveDtype,
+    };
+}
+
+// Sequential kernels cannot share one global max(compute, memory). Sum each
+// operation's own roofline lower bound, then add serialized collective time.
+export function computePipelineRoofline(totals, gpuKey) {
+    if (totals.rankTotals?.length) {
+        const rankEstimates = totals.rankTotals.map(rank => ({
+            dpRank: rank.dpRank,
+            ...computePipelineRoofline({ ...rank, rankTotals: null }, gpuKey),
+        }));
+        return rankEstimates.reduce((critical, estimate) =>
+            estimate.lowerBoundTime > critical.lowerBoundTime ? estimate : critical);
+    }
+    const estimates = totals.opCosts.map(({ cost }) => estimateOpRoofline(cost, gpuKey));
+    const computeTime = sum(estimates.map(e => e.computeTime));
+    const memoryTime = sum(estimates.map(e => e.memoryTime));
+    const communicationTime = sum(estimates.map(e => e.communicationTime));
+    const lowerBoundTime = sum(estimates.map(e => e.lowerBoundTime));
+    const hasComputeBound = estimates.some(e => e.bound === 'COMPUTE');
+    const hasMemoryBound = estimates.some(e => e.bound === 'MEM');
+    const bound = hasComputeBound && hasMemoryBound ? 'MIXED'
+        : hasComputeBound ? 'COMPUTE' : 'MEM';
+    return {
+        computeTime,
+        memoryTime,
+        communicationTime,
+        lowerBoundTime,
+        bound,
+        usedFallback: estimates.some(e => e.usedFallback),
+    };
 }

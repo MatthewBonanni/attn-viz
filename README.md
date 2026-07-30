@@ -24,7 +24,7 @@ Interactive visualization tool for exploring how self-attention works in transfo
 - **Paged Attention** toggle for block-based KV cache visualization
 - **Tensor Parallelism** toggle to show sharding across ranks
 - **RoPE** (Rotary Position Embedding) applied to all variants
-- **Cost analysis** — FLOPs, memory transfer, arithmetic intensity, and roofline analysis for A100/H100/B200
+- **Cost analysis** — FLOPs, memory transfer, arithmetic intensity, and ideal roofline lower bounds for A100/H100/B200/B300
 - **Click any tensor or operation** to see detailed breakdowns in the detail panel
 - **MLA dual-path view** showing both prefill and decode paths
 
@@ -68,3 +68,21 @@ Open [http://localhost:5001](http://localhost:5001) in your browser.
 2. Adjust dimension sliders — the visualization updates immediately
 3. Click any tensor block or operation node to inspect it in the detail panel
 4. Toggle Paged Attention or Tensor Parallelism to see how they change the computation graph
+
+## Performance Model
+
+The cost overlay reports single-GPU work or the critical-rank work when tensor/data
+parallelism is enabled. Variable-length batches use request-local attention volumes
+(`sum(S_q[i] * S[i])`) rather than multiplying packed-batch totals. Sliding-window
+attention counts the exact live causal band, and DSA counts the causal top-k volume.
+
+GPU time is an **ideal lower bound**, not a latency prediction:
+
+```text
+sum(max(op FLOPs / dtype peak, op HBM bytes / peak bandwidth))
+    + serialized TP ring all-reduce at peak interconnect bandwidth
+```
+
+It uses dense BF16/FP8 hardware peaks and excludes kernel launches, occupancy loss,
+contention, synchronization, and other implementation overhead. GPU specification
+sources are linked from the table in the app.

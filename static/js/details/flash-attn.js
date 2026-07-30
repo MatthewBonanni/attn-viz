@@ -2,7 +2,10 @@
 // Shows CTA assignment, tile computation, memory hierarchy, and split-KV reduction.
 
 import { drawDetailBlock, RANK_COLORS } from './shared.js';
-import { fmtBytes, fmtNum, tensorBytes, computeOpCost, GPU_SPECS, computeRooflineThreshold } from '../costs.js';
+import {
+    fmtBytes, fmtNum, tensorBytes, computeOpCost,
+    estimateOpRoofline, GPU_SPECS, computeRooflineThreshold,
+} from '../costs.js';
 
 const PAD = 20;
 
@@ -213,11 +216,10 @@ function updateControlStats(container, params, S_q, S, op, tensorMap, isGQA, G, 
     }
 
     // Cost + GPU timing
-    const cost = computeOpCost(op, tensorMap);
+    const cost = computeOpCost(op, tensorMap, { ...params, graphId: op.graphId });
     if (!cost) return;
 
-    const totalBytes = cost.readBytes + cost.writeBytes;
-    const threshold = computeRooflineThreshold('H100 SXM');
+    const threshold = computeRooflineThreshold('H100 SXM', cost.computeDtype);
     const ai = cost.arithmeticIntensity;
     const regime = cost.flops === 0 ? 'MEMORY-ONLY'
         : ai >= threshold ? 'COMPUTE-BOUND' : 'MEMORY-BOUND';
@@ -245,31 +247,34 @@ function updateControlStats(container, params, S_q, S, op, tensorMap, isGQA, G, 
         .style('width', '100%').style('border-collapse', 'collapse')
         .style('font-size', '12px').style('margin-top', '4px');
     const thead = table.append('tr');
-    for (const h of ['GPU', 'Compute', 'Memory', 'Bound', 'Time']) {
+    for (const h of ['GPU', 'Compute', 'HBM', 'Bound', 'Ideal ≥']) {
         thead.append('td')
             .style('color', '#555').style('padding', '1px 6px')
             .style('text-align', h === 'GPU' ? 'left' : 'right')
             .text(h);
     }
+    let usedFallback = false;
     for (const key of gpuKeys) {
-        const gpu = GPU_SPECS[key];
-        const computeTime = cost.flops > 0 ? cost.flops / (gpu.peakTFLOPS_bf16 * 1e12) : 0;
-        const memTime = totalBytes / (gpu.bandwidthTBs * 1e12);
-        const bottleneck = cost.flops === 0 ? 'MEM' : computeTime >= memTime ? 'COMPUTE' : 'MEM';
-        const bnTime = Math.max(computeTime, memTime);
-        const bnColor = bottleneck === 'COMPUTE' ? '#2ecc71' : '#e74c3c';
+        const estimate = estimateOpRoofline(cost, key);
+        usedFallback ||= estimate.usedFallback;
+        const bnColor = estimate.bound === 'COMPUTE' ? '#2ecc71' : '#e74c3c';
 
         const row = table.append('tr');
-        row.append('td').style('color', '#bbb').style('padding', '1px 6px').style('font-weight', '500').text(key);
+        row.append('td').style('color', '#bbb').style('padding', '1px 6px').style('font-weight', '500')
+            .text(key + (estimate.usedFallback ? '†' : ''));
         row.append('td').style('color', '#aaa').style('padding', '1px 6px').style('text-align', 'right')
-            .text(computeTime > 0 ? _fmtTime(computeTime) : '\u2014');
+            .text(estimate.computeTime > 0 ? _fmtTime(estimate.computeTime) : '\u2014');
         row.append('td').style('color', '#aaa').style('padding', '1px 6px').style('text-align', 'right')
-            .text(_fmtTime(memTime));
+            .text(_fmtTime(estimate.memoryTime));
         row.append('td').style('padding', '1px 6px').style('text-align', 'right')
-            .style('color', bnColor).style('font-weight', '600').text(bottleneck);
+            .style('color', bnColor).style('font-weight', '600').text(estimate.bound);
         row.append('td').style('color', '#7c8cf8').style('padding', '1px 6px').style('text-align', 'right')
-            .style('font-weight', '600').text(_fmtTime(bnTime));
+            .style('font-weight', '600').text(_fmtTime(estimate.lowerBoundTime));
     }
+    stats.append('div')
+        .style('font-size', '9px').style('color', '#666').style('margin-top', '4px')
+        .text('Ideal lower bound at dense dtype peak and peak HBM bandwidth; excludes launch, occupancy, and contention overhead.' +
+            (usedFallback ? ' †A100 uses BF16-rate fallback for FP8 math.' : ''));
 }
 
 function buildHTMLSlider(container, label, params, key, min, max, step, onChange) {
