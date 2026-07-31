@@ -918,7 +918,6 @@ function updateStatsOverlay(graphs, labels, crossover) {
 
         // GPU table
         const table = container.append('table')
-            .style('width', '100%')
             .style('border-collapse', 'collapse')
             .style('font-size', '11px');
 
