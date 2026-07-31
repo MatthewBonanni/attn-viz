@@ -893,6 +893,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
 
         // Critical-rank totals row
         const totalsRow = container.append('div')
+            .classed('stats-fill', true)
             .style('display', 'flex')
             .style('gap', '12px')
             .style('align-items', 'center')
@@ -972,6 +973,7 @@ function updateStatsOverlay(graphs, labels, crossover) {
     });
 
     container.append('div')
+        .classed('stats-fill', true)
         .style('border-top', '1px solid #2a2d3a')
         .style('margin-top', '7px')
         .style('padding-top', '5px')

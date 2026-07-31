@@ -189,6 +189,11 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
     line-height: 1.6;
 }
 #stats-overlay:empty { display: none; }
+/* The overlay is shrink-to-fit, so prose and long single-line rows would set its
+   width and leave the GPU tables floating in dead space. Zero width keeps these
+   out of the intrinsic-width calculation; min-width reflows them to whatever the
+   tables end up needing. */
+#stats-overlay .stats-fill { width: 0; min-width: 100%; }
 
 /* Tooltip */
 #tooltip {
