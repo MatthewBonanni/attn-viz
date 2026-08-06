@@ -1,13 +1,14 @@
 // main.js — Entry point: D3 setup, zoom/pan, sliders, presets, toggles, update loop
 
 import { renderGraph, computeSharedStagePositions, setDimScaleContext } from './render.js';
-import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, dsaGraph, VARIANT_DESCS } from './graphs.js';
+import { mhaGraph, gqaGraph, mqaGraph, mlaUpprojGraph, mlaAbsorbedGraph, dsaGraph, dsv4Graph, VARIANT_DESCS } from './graphs.js';
 import { showDetail, showTensorDetail, showGroupDetail, hideDetail, refreshDetail } from './details/index.js';
 import {
     computePipelineTotals, computePipelineRoofline,
     fmtNum, fmtBytes, tensorBytes, GPU_SPECS, GPU_SPEC_AS_OF,
 } from './costs.js';
 import { readUrlState, writeUrlState } from './url-state.js';
+import { WORKLOAD_PRESETS, applyWorkloadPreset, detectWorkloadPreset } from './workloads.js';
 
 const GRAPH_FNS = {
     mha: mhaGraph, gqa: gqaGraph, mqa: mqaGraph, dsa: dsaGraph,
@@ -19,14 +20,16 @@ const VARIANTS = [
     { id: 'mqa', label: 'MQA' },
     { id: 'mla', label: 'MLA' },
     { id: 'dsa', label: 'DSA' },
+    { id: 'dsv4', label: 'CSA' },
 ];
 
 const SLIDER_DEFS = {
     B:      { label: 'B (batch)',         min: 1, max: 16,   step: 1,  default: 4, logScale: true },
-    S:      { label: 'S (seq length)',     min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
-    S_q:    { label: 'S_q (query len)',   min: 1, max: 8192, step: 1,  default: 1024, logScale: true },
+    S:      { label: 'S (seq length)',     min: 1, max: 1048576, step: 1,  default: 1024, logScale: true },
+    S_q:    { label: 'S_q (query len)',   min: 1, max: 1048576, step: 1,  default: 1024, logScale: true },
     n_h:    { label: 'n_h (heads)',       min: 1, max: 128,  step: 1,  default: 8 },
-    d_h:    { label: 'd_h (head dim)',    min: 1, max: 256,  step: 1,  default: 64 },
+    d_h:    { label: 'd_h (head dim)',    min: 1, max: 512,  step: 1,  default: 64 },
+    d_model:{ label: 'D (model width)',   min: 128, max: 32768, step: 128, default: 4096, logScale: true },
     n_kv:   { label: 'n_kv (KV heads)',   min: 1, max: 128,  step: 1,  default: 2 },
     d_c:    { label: 'd_c (KV latent)',   min: 1, max: 4096, step: 1,  default: 512 },
     d_q:    { label: 'd_q (Q latent)',   min: 1, max: 4096, step: 1,  default: 1536 },
@@ -70,6 +73,7 @@ const VARIANT_SLIDERS = {
     mqa: ['n_h', 'd_h'],
     mla: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r'],
     dsa: ['n_h', 'd_h', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i'],
+    dsv4: ['d_model', 'n_h', 'd_h', 'd_r', 'topk', 'n_i', 'd_i'],
 };
 
 // Model presets
@@ -90,15 +94,17 @@ const PRESETS = [
     { name: 'DeepSeek R1', variant: 'mla', n_h: 128, d_h: 128, d_c: 512, d_q: 1536, d_r: 64 },
     // S/S_q set so sparsity is visible by default (k = 2048 < S)
     { name: 'DeepSeek V3.2', variant: 'dsa', n_h: 128, d_h: 128, d_c: 512, d_q: 1536, d_r: 64, topk: 2048, n_i: 64, d_i: 128, S: 8192, S_q: 8192 },
+    { name: 'DeepSeek V4 Flash', variant: 'dsv4', d_model: 4096, n_h: 64, d_h: 512, d_r: 64, topk: 512, n_i: 64, d_i: 128, S: 65536, S_q: 65536 },
 ];
 
 // Default preset index per variant
 const VARIANT_DEFAULT_PRESETS = {
-    mha: 1,   // GPT-2 (124M)
-    gqa: 3,   // Llama 3.1 8B
-    mqa: 12, // StarCoder (15B)
-    mla: 13, // DeepSeek R1
+    mha: PRESETS.findIndex(p => p.name === 'GPT-2 (124M)'),
+    gqa: PRESETS.findIndex(p => p.name === 'Llama 3.1 8B'),
+    mqa: PRESETS.findIndex(p => p.name === 'StarCoder (15B)'),
+    mla: PRESETS.findIndex(p => p.name === 'DeepSeek R1'),
     dsa: PRESETS.findIndex(p => p.variant === 'dsa'),
+    dsv4: PRESETS.findIndex(p => p.variant === 'dsv4'),
 };
 
 // --- State ---
@@ -118,11 +124,12 @@ params.seqLens = [params.S];     // per-request total S (cached + new)
 params.queryLens = [params.S_q]; // per-request S_q (new query tokens)
 
 let currentVariant = 'mha';
+let currentDsv4Layer = 'c4';
 
 // Apply a preset's model config to params, including sliding-window state, and
 // sync the SWA toggle UI. Execution toggles (flash/paged) are left untouched.
 function applyPresetParams(preset) {
-    for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
+    for (const key of ['B', 'S', 'S_q', 'd_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
         if (preset[key] != null) params[key] = preset[key];
     }
     // Presets that pin S/S_q must also reset the per-request arrays, otherwise
@@ -145,7 +152,7 @@ function presetBaseline(preset) {
     base.pagedAttn = false;
     base.slidingWindow = false;
     if (preset) {
-        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
+        for (const key of ['B', 'S', 'S_q', 'd_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
             if (preset[key] != null) base[key] = preset[key];
         }
         base.slidingWindow = !!preset.slidingWindow;
@@ -162,6 +169,7 @@ function syncUrl() {
     const idx = currentPresetIdx();
     writeUrlState({
         variant: currentVariant,
+        layer: currentDsv4Layer,
         preset: idx,
         params,
         baseline: presetBaseline(PRESETS[idx]),
@@ -218,12 +226,68 @@ function buildVariantTabs() {
                     applyPresetParams(preset);
                 }
                 d3.select('#preset-select').property('value', String(presetIdx));
+                buildDsv4ModeTabs();
                 updateVariantDesc();
                 buildSliders();
                 update();
                 setTimeout(fitToView, 300);
             });
     }
+}
+
+function buildDsv4ModeTabs() {
+    const container = d3.select('#dsv4-mode');
+    container.classed('visible', currentVariant === 'dsv4');
+    container.selectAll('*').remove();
+    if (currentVariant !== 'dsv4') return;
+
+    const layers = [
+        { id: 'c4', label: 'C4' },
+        { id: 'c128', label: 'C128' },
+        { id: 'swa', label: 'SWA' },
+    ];
+    for (const layer of layers) {
+        container.append('button')
+            .attr('data-layer', layer.id)
+            .classed('active', currentDsv4Layer === layer.id)
+            .text(layer.label)
+            .on('click', () => {
+                hideDetail();
+                currentDsv4Layer = layer.id;
+                params.dsv4Layer = layer.id;
+                container.selectAll('button').classed('active', false);
+                container.select(`[data-layer="${layer.id}"]`).classed('active', true);
+                buildSliders();
+                update();
+                setTimeout(fitToView, 300);
+            });
+    }
+}
+
+function buildWorkloadPresets() {
+    const container = d3.select('#workload-presets');
+    container.selectAll('*').remove();
+    for (const preset of WORKLOAD_PRESETS) {
+        container.append('button')
+            .attr('type', 'button')
+            .attr('data-workload', preset.id)
+            .attr('title', preset.title)
+            .text(preset.label)
+            .on('click', () => {
+                hideDetail();
+                applyWorkloadPreset(params, preset.id);
+                buildSliders();
+                update();
+                setTimeout(fitToView, 300);
+            });
+    }
+    updateWorkloadPresetState();
+}
+
+function updateWorkloadPresetState() {
+    const active = detectWorkloadPreset(params);
+    d3.select('#workload-presets').selectAll('button')
+        .classed('active', function() { return this.dataset.workload === active; });
 }
 
 // --- Variant description ---
@@ -255,6 +319,7 @@ function buildPresets() {
 
         d3.select('#variant-tabs').selectAll('button').classed('active', false);
         d3.select('#variant-tabs').select(`[data-variant="${currentVariant}"]`).classed('active', true);
+        buildDsv4ModeTabs();
         updateVariantDesc();
         buildSliders();
         update();
@@ -292,8 +357,8 @@ function setupToggles() {
 // DSA's core attention is a dedicated fused sparse kernel (FlashMLA-sparse) and its
 // causality lives in the top-k selection, so the Flash and SWA toggles don't apply.
 function updateToggleVisibility() {
-    const isDsa = currentVariant === 'dsa';
-    if (isDsa) {
+    const hasDedicatedAttention = currentVariant === 'dsa' || currentVariant === 'dsv4';
+    if (hasDedicatedAttention) {
         if (params.flashAttn) {
             params.flashAttn = false;
             d3.select('#toggle-flash').classed('active', false);
@@ -306,7 +371,7 @@ function updateToggleVisibility() {
     // Hide the whole row (label + switch), not just the switch
     for (const id of ['#toggle-flash', '#toggle-swa']) {
         const node = d3.select(id).node();
-        if (node) d3.select(node.parentNode).style('display', isDsa ? 'none' : null);
+        if (node) d3.select(node.parentNode).style('display', hasDedicatedAttention ? 'none' : null);
     }
 }
 
@@ -363,7 +428,7 @@ function buildSlider(container, key) {
         params[key] = v;
 
         // Switch preset to "Custom" when a model architecture param changes
-        if (['n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r'].includes(key)) {
+        if (['d_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r'].includes(key)) {
             d3.select('#preset-select').property('value', '0');
         }
 
@@ -476,7 +541,10 @@ function buildSliders() {
     // Model architecture sliders (variant-specific)
     const dimContainer = d3.select('#sliders');
     dimContainer.selectAll('*').remove();
-    for (const key of VARIANT_SLIDERS[currentVariant]) {
+    const sliderKeys = currentVariant === 'dsv4' && currentDsv4Layer !== 'c4'
+        ? ['d_model', 'n_h', 'd_h', 'd_r']
+        : VARIANT_SLIDERS[currentVariant];
+    for (const key of sliderKeys) {
         if (currentVariant === 'gqa' && key === 'n_h') {
             // Render n_h and n_kv side by side
             const pair = dimContainer.append('div').attr('class', 'slider-pair');
@@ -652,8 +720,10 @@ function updateDerived() {
     params.sumS = params.seqLens.slice(0, params.B).reduce((a, b) => a + b, 0);
 
     // Model architecture derived values
-    const D = params.n_h * params.d_h;
-    let archHtml = `<div class="derived-dim">D = n_h × d_h = <span>${D}</span></div>`;
+    const D = currentVariant === 'dsv4' ? params.d_model : params.n_h * params.d_h;
+    let archHtml = currentVariant === 'dsv4'
+        ? `<div class="derived-dim">D (model width): <span>${D}</span></div><div class="derived-dim">Wide Q: <span>${params.n_h * params.d_h}</span></div>`
+        : `<div class="derived-dim">D = n_h × d_h = <span>${D}</span></div>`;
     if (currentVariant === 'mla') {
         const dr = params.d_r || 64;
         const totalCache = params.d_c + dr;
@@ -672,6 +742,20 @@ function updateDerived() {
         const mlaBytes = (params.d_c + dr) * 2;
         const idxBytes = params.d_i * 1;
         archHtml += `<div class="derived-dim">Cache per token: <span>${mlaBytes + idxBytes} B</span> (MLA ${mlaBytes} + idx ${idxBytes})</div>`;
+    }
+    if (currentVariant === 'dsv4') {
+        const ratio = currentDsv4Layer === 'c4' ? 4 : currentDsv4Layer === 'c128' ? 128 : 1;
+        const compressed = currentDsv4Layer === 'swa' ? 0
+            : params.seqLens.slice(0, params.B).reduce((sum, s) => sum + Math.floor(s / ratio), 0);
+        const longRange = currentDsv4Layer === 'c4'
+            ? params.seqLens.slice(0, params.B).reduce((sum, s) => sum + Math.min(params.topk, Math.floor(s / ratio)), 0)
+            : compressed;
+        archHtml += `<div class="derived-dim">Layer type: <span>${currentDsv4Layer.toUpperCase()}</span></div>`;
+        if (currentDsv4Layer !== 'swa') {
+            archHtml += `<div class="derived-dim">Compressed entries: <span>${compressed.toLocaleString()}</span> (${ratio}:1)</div>`;
+            archHtml += `<div class="derived-dim">Long-range attended: <span>${longRange.toLocaleString()}</span></div>`;
+        }
+        archHtml += `<div class="derived-dim">Local window: <span>128 native tokens</span></div>`;
     }
     d3.select('#derived').html(archHtml);
 
@@ -713,6 +797,14 @@ function updateDerived() {
             rtHtml += `<div class="derived-dim">Attended fraction: <span>${(frac * 100).toFixed(1)}%</span> of context</div>`;
         }
     }
+    if (currentVariant === 'dsv4') {
+        const ratio = currentDsv4Layer === 'c4' ? 4 : currentDsv4Layer === 'c128' ? 128 : 1;
+        const completed = currentDsv4Layer === 'swa' ? []
+            : params.seqLens.slice(0, params.B).map(s => Math.floor(s / ratio));
+        if (completed.length) {
+            rtHtml += `<div class="derived-dim">Complete ${currentDsv4Layer.toUpperCase()} groups: <span>[${completed.join(', ')}]</span></div>`;
+        }
+    }
     if (params.pagedAttn) {
         const sLens = params.seqLens.slice(0, params.B);
         const blocksPerSeq = sLens.map(s => Math.ceil(s / params.block_size));
@@ -728,6 +820,7 @@ function updateDerived() {
         }
     }
     d3.select('#derived-runtime').html(rtHtml);
+    updateWorkloadPresetState();
 
     const sharded = params.tp_size > 1 || params.dp_size > 1;
     d3.select('#legend-qkv-separate').style('display', sharded ? 'none' : null);
@@ -1138,6 +1231,21 @@ function update() {
 
     if (currentVariant === 'mla') {
         renderMlaStacked();
+        return;
+    }
+
+    if (currentVariant === 'dsv4') {
+        params.dsv4Layer = currentDsv4Layer;
+        const graph = dsv4Graph(params, currentDsv4Layer);
+        annotateGraph(graph);
+        setDimScaleContext(graph);
+        renderGraph(scene, graph, params,
+            (op) => showDetail(op, graph, params),
+            (tensor) => showTensorDetail(tensor, params),
+            undefined, undefined,
+            (group) => showGroupDetail(group));
+        updateStatsOverlay([graph]);
+        refreshDetail([graph], params);
         return;
     }
 
@@ -1615,6 +1723,11 @@ function applyStateFromUrl() {
     if (urlState && urlState.variant && VARIANTS.some(v => v.id === urlState.variant)) {
         currentVariant = urlState.variant;
     }
+    if (urlState?.layer && ['c4', 'c128', 'swa'].includes(urlState.layer)) {
+        currentDsv4Layer = urlState.layer;
+    } else if (currentVariant === 'dsv4') {
+        currentDsv4Layer = 'c4';
+    }
 
     let presetIdx = VARIANT_DEFAULT_PRESETS[currentVariant] || 0;
     if (urlState && urlState.preset != null && PRESETS[urlState.preset]
@@ -1630,7 +1743,7 @@ function applyStateFromUrl() {
 
     const preset = PRESETS[presetIdx];
     if (preset && preset.variant) {
-        for (const key of ['B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
+        for (const key of ['B', 'S', 'S_q', 'd_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r', 'topk', 'n_i', 'd_i']) {
             if (preset[key] != null) params[key] = preset[key];
         }
         params.slidingWindow = !!preset.slidingWindow;
@@ -1656,6 +1769,7 @@ function syncStateUI(presetIdx) {
     d3.selectAll('#variant-tabs button')
         .classed('active', function() { return this.dataset.variant === currentVariant; });
     updateVariantDesc();
+    buildDsv4ModeTabs();
     d3.select('#preset-select').property('value', String(presetIdx));
     d3.select('#toggle-flash').classed('active', params.flashAttn);
     d3.select('#toggle-paged').classed('active', params.pagedAttn);
@@ -1666,6 +1780,7 @@ const initPresetIdx = applyStateFromUrl();
 
 buildVariantTabs();
 buildPresets();
+buildWorkloadPresets();
 syncStateUI(initPresetIdx);
 setupToggles();
 buildSliders();
@@ -1709,6 +1824,9 @@ const GLOSSARY = [
         { term: 'MQA', aka: 'Multi-Query Attention', def: 'The extreme case of GQA where all query heads share a single key/value head. Used in StarCoder and Falcon.' },
         { term: 'MLA', aka: 'Multi-Head Latent Attention', def: 'A variant (from DeepSeek) that compresses keys and values into a low-rank latent space, reducing cache size. Uses separate pipelines for prefill and decode.' },
         { term: 'DSA', aka: 'DeepSeek Sparse Attention', def: 'MLA plus a lightweight "lightning indexer" that scores all cached tokens per query and keeps only the top-k. Core attention runs over just those k tokens, cutting attention cost from O(S) to O(k) at long context. Used in DeepSeek-V3.2.' },
+        { term: 'CSA / C4', aka: 'Compressed Sparse Attention', def: 'A DeepSeek-V4 layer that pools overlapping 8-token spans at stride 4, indexes the compressed history, selects the top 512 entries per query, and combines them with a 128-token local window.' },
+        { term: 'HCA / C128', aka: 'Heavily Compressed Attention', def: 'A DeepSeek-V4 layer that pools non-overlapping 128-token groups and attends densely to every causally complete compressed entry, alongside a 128-token local window.' },
+        { term: 'SWA layer', aka: 'Sliding-Window Attention', def: 'A DeepSeek-V4 local-only layer that attends to at most the latest 128 uncompressed tokens and has no long-range compressor.' },
     ]},
     { section: 'Dimensions', entries: [
         { term: 'B', def: 'Batch size — the number of independent requests being processed together.' },
@@ -1717,7 +1835,7 @@ const GLOSSARY = [
         { term: 'n_h', aka: 'Number of heads', def: 'How many parallel attention heads the model uses. Each head attends independently, then results are concatenated.' },
         { term: 'n_kv', aka: 'Number of KV heads', def: 'Number of key/value head groups (in GQA). Multiple query heads share each KV head. When n_kv = n_h, it\'s MHA; when n_kv = 1, it\'s MQA.' },
         { term: 'd_h', aka: 'Head dimension', def: 'The dimensionality of each attention head. Q, K, and V vectors within a head have this size.' },
-        { term: 'D', aka: 'Model dimension', def: 'The full hidden dimension of the model, equal to n_h \u00d7 d_h. This is the width of the residual stream.' },
+        { term: 'D', aka: 'Model dimension', def: 'The width of the residual stream. In conventional attention it is usually n_h × d_h; DeepSeek-V4 projects D into a much wider query-head space.' },
         { term: 'd_c', def: 'KV latent dimension in MLA. The compressed representation size for keys and values.' },
         { term: 'd_q', def: 'Q latent dimension in MLA. The compressed representation size for queries.' },
         { term: 'd_r', def: 'RoPE dimension in MLA. The portion of each head dedicated to rotary position embeddings.' },

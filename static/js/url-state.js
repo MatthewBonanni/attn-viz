@@ -5,7 +5,7 @@
 // gives a two-parameter URL; tweaking sliders adds only what you tweaked.
 
 export const URL_KEYS = [
-    'B', 'S', 'S_q', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r',
+    'B', 'S', 'S_q', 'd_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r',
     'topk', 'n_i', 'd_i', 'tp_size', 'dp_size', 'block_size', 'window_size',
 ];
 
@@ -26,6 +26,7 @@ export function readUrlState() {
 
     const state = { values: {}, flags: {} };
     if (q.has('v')) state.variant = q.get('v');
+    if (q.has('l')) state.layer = q.get('l');
     if (q.has('p')) {
         const p = parseInt(q.get('p'), 10);
         if (Number.isFinite(p)) state.preset = p;
@@ -46,9 +47,10 @@ export function readUrlState() {
 
 // Build the hash for the current view. `baseline` is the params object that
 // loading this variant + preset from scratch would produce.
-export function buildHash({ variant, preset, params, baseline }) {
+export function buildHash({ variant, layer, preset, params, baseline }) {
     const q = new URLSearchParams();
     q.set('v', variant);
+    if (variant === 'dsv4' && layer && layer !== 'c4') q.set('l', layer);
     if (preset != null && preset > 0) q.set('p', String(preset));
 
     for (const key of URL_KEYS) {

@@ -50,6 +50,7 @@ function normalizedWorkload(params = {}) {
         seqLens,
         windowSize: params.slidingWindow ? Math.max(1, params.window_size || 1) : null,
         topk: Math.max(1, params.topk || 2048),
+        dsv4Layer: params.dsv4Layer || String(params.graphId || '').replace(/^dsv4_/, '') || null,
         tpSize: Math.max(1, params.tp_size || 1),
         dpSize: Math.max(1, Math.min(params.dp_size || 1, B)),
         dpRank: Number.isInteger(params.dpRank) ? params.dpRank : null,
@@ -85,8 +86,57 @@ export function computeSparsePairs(params = {}) {
     return sum(w.seqLens.map((s, i) => queryPairCount(s, w.queryLens[i], w.topk)));
 }
 
+function dsv4Ratio(layer) {
+    return layer === 'c4' ? 4 : layer === 'c128' ? 128 : 1;
+}
+
+function queryPositionWork(s, q, fn) {
+    const firstQueryPos = s - q;
+    let total = 0;
+    for (let i = 0; i < q; i++) total += fn(firstQueryPos + i);
+    return total;
+}
+
+function dsv4PerRequestWork(kind, workload) {
+    const layer = workload.dsv4Layer;
+    const ratio = dsv4Ratio(layer);
+    return workload.seqLens.map((s, i) => {
+        const q = workload.queryLens[i];
+        if (kind === 'compressedS') return layer === 'swa' ? 0 : Math.floor(s / ratio);
+        if (kind === 'compressedNew') {
+            return layer === 'swa' ? 0 : Math.floor(s / ratio) - Math.floor((s - q) / ratio);
+        }
+        if (kind === 'localS') return Math.min(s, 128);
+        if (kind === 'compressedDense') {
+            return queryPositionWork(s, q, pos => Math.floor((pos + 1) / ratio));
+        }
+        if (kind === 'compressedSparse') {
+            return queryPositionWork(s, q, pos =>
+                Math.min(workload.topk, Math.floor((pos + 1) / ratio)));
+        }
+        if (kind === 'hybridAttention') {
+            return queryPositionWork(s, q, pos => {
+                const local = Math.min(128, pos + 1);
+                if (layer === 'swa') return local;
+                const compressed = Math.floor((pos + 1) / ratio);
+                return local + (layer === 'c4' ? Math.min(workload.topk, compressed) : compressed);
+            });
+        }
+        return 0;
+    });
+}
+
+export function computeDsv4AttentionPairs(params = {}, layer = 'c4') {
+    const workload = normalizedWorkload({ ...params, dsv4Layer: layer });
+    return sum(dsv4PerRequestWork('hybridAttention', workload));
+}
+
 function perRequestWork(kind, params) {
     const w = normalizedWorkload(params);
+    if (['compressedS', 'compressedNew', 'localS', 'compressedDense',
+        'compressedSparse', 'hybridAttention'].includes(kind)) {
+        return dsv4PerRequestWork(kind, w);
+    }
     if (kind === 'q') return w.queryLens;
     if (kind === 's') return w.seqLens;
     if (kind === 'dense') return w.seqLens.map((s, i) => s * w.queryLens[i]);
@@ -125,6 +175,17 @@ function tensorWorkKind(tensor, context) {
     const hasQ = names.includes('S_q');
     const hasS = names.includes('S');
     const hasK = names.includes('k');
+    const hasCompressed = names.includes('C');
+    const hasCompressedNew = names.includes('C_new');
+    const hasCompressedK = names.includes('K_c');
+    const hasLocal = names.includes('L');
+    const hasHybrid = names.includes('A');
+    if (hasQ && hasHybrid) return 'hybridAttention';
+    if (hasQ && hasCompressedK) return 'compressedSparse';
+    if (hasQ && hasCompressed) return 'compressedDense';
+    if (hasCompressedNew) return 'compressedNew';
+    if (hasCompressed) return 'compressedS';
+    if (hasLocal) return 'localS';
     if (hasQ && hasS) return context.graphId === 'dsa' ? 'dense' : 'attention';
     if (hasQ && hasK) return 'sparse';
     if (hasQ) return 'q';
@@ -134,7 +195,13 @@ function tensorWorkKind(tensor, context) {
 
 function tensorOtherDimProduct(tensor, kind) {
     const names = (tensor.dimNames || []).map(normalizedDimName);
-    const excluded = kind === 'sparse' ? new Set(['S_q', 'k'])
+    const excluded = kind === 'hybridAttention' ? new Set(['S_q', 'A'])
+        : kind === 'compressedSparse' ? new Set(['S_q', 'K_c'])
+        : kind === 'compressedDense' ? new Set(['S_q', 'C'])
+        : kind === 'compressedNew' ? new Set(['C_new'])
+        : kind === 'compressedS' ? new Set(['C'])
+        : kind === 'localS' ? new Set(['L'])
+        : kind === 'sparse' ? new Set(['S_q', 'k'])
         : kind === 'dense' || kind === 'attention' ? new Set(['S_q', 'S'])
         : kind === 'q' ? new Set(['S_q'])
         : kind === 's' ? new Set(['S']) : new Set();
@@ -217,7 +284,9 @@ function opWorkKind(inputs, output, context) {
         .filter(t => t && t.type !== 'weight')
         .map(t => tensorWorkKind(t, context))
         .filter(Boolean);
-    return ['attention', 'dense', 'sparse', 'q', 's'].find(kind => kinds.includes(kind)) || 'q';
+    return ['hybridAttention', 'compressedDense', 'compressedSparse',
+        'attention', 'dense', 'sparse', 'compressedNew', 'compressedS',
+        'localS', 'q', 's'].find(kind => kinds.includes(kind)) || 'q';
 }
 
 function criticalDpRank(kind, context) {
@@ -298,9 +367,11 @@ export function computeOpCost(op, tensorMap, context = {}) {
             const outputKind = tensorWorkKind(output, context);
             const aKind = tensorWorkKind(A, context);
             let flops;
-            if (['dense', 'attention', 'sparse'].includes(outputKind)) {
+            const pairKinds = ['dense', 'attention', 'sparse', 'hybridAttention',
+                'compressedDense', 'compressedSparse'];
+            if (pairKinds.includes(outputKind)) {
                 flops = 2 * tensorElementInfo(output, context).elements * K;
-            } else if (['dense', 'attention', 'sparse'].includes(aKind)) {
+            } else if (pairKinds.includes(aKind)) {
                 flops = 2 * tensorElementInfo(A, context).elements * N;
             } else {
                 flops = 2 * batchSize * M * K * N;
@@ -341,6 +412,13 @@ export function computeOpCost(op, tensorMap, context = {}) {
             const elements = tensorElementInfo(output, context).elements;
             const flops = 3 * elements;
             return finish(flops, [readItem(inputs[0]), writeItem(output)]);
+        }
+
+        case 'pool': {
+            const poolWidth = Math.max(1, op.poolWidth || 1);
+            const elements = tensorElementInfo(output, context).elements;
+            const flops = 2 * poolWidth * elements;
+            return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
         }
 
         case 'add': {

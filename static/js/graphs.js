@@ -8,6 +8,7 @@ export const VARIANT_DESCS = {
     mqa: `<b>Multi-Query Attention</b> (Shazeer, 2019) — All n_h query heads share a single K and V head. Reduces KV cache to O(2 · d_h · S) per layer — an n_h× reduction vs MHA. Trades some quality for dramatically faster inference. Used in PaLM, Falcon, StarCoder.`,
     mla: `<b>Multi-Head Latent Attention</b> (DeepSeek-V2, 2024) — Compresses KV representations via a low-rank bottleneck. Instead of caching full K, V tensors (size n_h · d_h per token), caches a compressed latent c_kv of size d_c ≪ n_h · d_h. During inference, the <b>up-projected</b> path is used for compute-bound <em>prefills</em>, while the <b>absorbed</b> path is used for memory-bandwidth-bound <em>decodes</em>. Both are shown below.`,
     dsa: `<b>DeepSeek Sparse Attention</b> (DeepSeek-V3.2, 2025) — MLA plus a learned <b>lightning indexer</b>: a small FP8 scorer (n_i heads of d_i dims, MQA-style shared key) that rates every cached token per query, then keeps only the <b>top-k</b> (k=2048). Core attention runs in MLA's absorbed (MQA-style) form over just those k tokens — for both prefill and decode — cutting attention cost from O(S) to O(k) per query at long context.`,
+    dsv4: `<b>DeepSeek-V4 hybrid attention</b> (2026) — Decoder blocks choose one of three layer types. <b>C4</b> uses overlapping 8-token pooling at stride 4, a lightning indexer, and top-512 compressed entries. <b>C128</b> pools non-overlapping groups of 128 and attends to the full compressed history. Both add an uncompressed 128-token local branch; <b>SWA</b> layers keep only that local branch. Keys and values are shared (K=V), with inverse RoPE applied to the attention output.`,
 };
 
 // Dim label helpers: when B > 1, S_q/S labels become ΣS_q/ΣS
@@ -808,4 +809,220 @@ export function dsaGraph(p) {
               desc: `Latent context c_ctx is decompressed via W↑v (d_c=${d_c} → d_h=${d_h}) once per query position, then merged across heads and projected through Wo back to model dimension D.` },
         ]
     };
+}
+
+// --- DeepSeek-V4 hybrid compressed attention ---
+
+function dsv4RequestLengths(p) {
+    const B = Math.max(1, p.B || 1);
+    const seqLens = p.seqLens?.slice(0, B) || Array(B).fill(p.S || 1);
+    return seqLens.length ? seqLens : [p.S || 1];
+}
+
+export function dsv4CompressedLength(p, ratio) {
+    return dsv4RequestLengths(p)
+        .reduce((total, s) => total + Math.floor(Math.max(0, s) / ratio), 0);
+}
+
+export function dsv4Graph(p, layerType = 'c4') {
+    const { n_h, d_h, d_r, n_i, d_i, B } = p;
+    const D = p.d_model || 4096;
+    const S_q = p.sumSq || p.S_q || p.S;
+    const seqLens = dsv4RequestLengths(p);
+    const window = 128;
+    const localLen = seqLens.reduce((total, s) => total + Math.min(s, window), 0);
+    const ratio = layerType === 'c4' ? 4 : layerType === 'c128' ? 128 : 1;
+    const compressedLen = layerType === 'swa' ? 0 : dsv4CompressedLength(p, ratio);
+    const newCompressedLen = layerType === 'swa' ? 0 : seqLens.reduce((total, s, i) => {
+        const q = p.queryLens?.[i] ?? p.S_q ?? 1;
+        return total + Math.floor(s / ratio) - Math.floor(Math.max(0, s - q) / ratio);
+    }, 0);
+    const selectedLen = layerType === 'c4'
+        ? seqLens.reduce((total, s) => total + Math.min(p.topk || 512, Math.floor(s / ratio)), 0)
+        : compressedLen;
+    const attendedLen = Math.max(1, localLen + selectedLen);
+    const C = Math.max(1, compressedLen);
+    const K = Math.max(1, selectedLen);
+    const L = Math.max(1, localLen);
+    const dr = d_r || 64;
+    const ni = n_i || 64;
+    const di = d_i || 128;
+    const qWidth = n_h * d_h;
+    const outRank = 1024;
+    const lq = sqLabel(B);
+    const longLabel = layerType === 'c4' ? 'C4' : 'C128';
+    const isC4 = layerType === 'c4';
+    const hasCompressor = layerType !== 'swa';
+
+    const tensors = [
+        { id: 'X', shape: [S_q, D], label: 'X', stage: 0, row: 3, color: '#4a90d9', dimNames: [lq, 'D'],
+          desc: `Input activations. DeepSeek-V4-Flash uses model width D=${D}; its query projection expands to ${n_h} heads × ${d_h} dims.` },
+        { id: 'W_Q', shape: [D, qWidth], label: 'Wq', stage: 1, row: 0, color: '#7b68ee', dimNames: ['D', 'n_h·d_h'], type: 'weight', checkpointKey: 'q_proj',
+          desc: `Query projection from D=${D} to ${n_h} heads of ${d_h} dimensions.` },
+        { id: 'Q_flat', shape: [S_q, qWidth], label: 'Q_flat', stage: 2, row: 0, color: '#e74c3c', dimNames: [lq, 'n_h·d_h'],
+          desc: 'Wide query projection before splitting into heads.' },
+        { id: 'Q', shape: [n_h, S_q, d_h], label: 'Q', stage: 3, row: 0, color: '#e74c3c', dimNames: ['n_h', lq, 'd_h'],
+          desc: `Queries split into n_h=${n_h} heads. Only the trailing d_r=${dr} channels receive RoPE.` },
+        { id: 'Q_r', shape: [n_h, S_q, d_h], label: "Q'", stage: 4, row: 0, color: '#e74c3c', dimNames: ['n_h', lq, 'd_h'],
+          desc: `Queries after partial RoPE on the trailing ${dr} of ${d_h} channels.` },
+        { id: 'W_KV', shape: [D, d_h], label: 'Wkv', stage: 1, row: 3, color: '#7b68ee', dimNames: ['D', 'd_h'], type: 'weight', checkpointKey: 'kv_proj',
+          desc: `A single shared KV projection. The same ${d_h}-dimensional vector is used as both key and value (MQA-style K=V).` },
+        { id: 'KV_new', shape: [S_q, d_h], label: 'K=V new', stage: 2, row: 3, color: '#f39c12', dimNames: [lq, 'd_h'],
+          desc: 'Uncompressed shared K=V vectors for the new query tokens.' },
+        { id: 'KV_local', shape: [L, d_h], label: 'K=V local', stage: 4, row: 3, color: '#f39c12', dimNames: ['L', 'd_h'], cache: true, badge: 'SWA 128',
+          desc: `The uncompressed local K=V cache. It retains at most ${window} recent native tokens so fine-grained local information is always available.` },
+    ];
+
+    const ops = [
+        { id: 'proj_q', type: 'matmul', inputs: ['X', 'W_Q'], output: 'Q_flat', label: 'Linear',
+          desc: `Project each input token to ${n_h} query heads.` },
+        { id: 'view_q', type: 'reshape', inputs: ['Q_flat'], output: 'Q', label: 'View',
+          desc: `View [S_q, ${qWidth}] as [${n_h}, S_q, ${d_h}].` },
+        { id: 'rope_q', type: 'rope', inputs: ['Q'], output: 'Q_r', label: 'Partial RoPE',
+          desc: `Apply RoPE only to the trailing d_r=${dr} channels of each query head.` },
+        { id: 'proj_kv', type: 'matmul', inputs: ['X', 'W_KV'], output: 'KV_new', label: 'Shared KV',
+          desc: `Project one ${d_h}-dimensional vector per token and share it as K and V.` },
+        { id: 'cache_local', type: 'cache', inputs: ['KV_new'], output: 'KV_local', label: 'SWA Cache', alignX: 'kv_cache',
+          desc: `Append native-token K=V vectors and retain the most recent ${window} positions.` },
+    ];
+
+    if (hasCompressor) {
+        const poolWidth = isC4 ? 8 : 128;
+        tensors.push(
+            { id: 'compress_state', shape: [poolWidth, d_h], label: `${poolWidth}-token state`, stage: 3, row: 5, color: '#e67e22', dimNames: ['pool', 'd_h'], badge: 'ROLLING',
+              desc: isC4
+                  ? 'C4 keeps an 8-token overlapping weighted-pooling state. It emits one compressed entry every 4 native tokens.'
+                  : 'C128 keeps one non-overlapping 128-token weighted-pooling state and emits one entry when the group completes.' },
+            { id: 'KV_compressed_new', shape: [newCompressedLen, d_h], label: `K=V ${longLabel} new`, stage: 4, row: 5, color: '#e67e22', dimNames: ['C_new', 'd_h'], badge: longLabel,
+              desc: `${newCompressedLen} newly completed ${longLabel} entr${newCompressedLen === 1 ? 'y' : 'ies'} in this step. Most single-token decode steps update only the rolling state and emit nothing.` },
+            { id: 'KV_compressed', shape: [C, d_h], label: `K=V ${longLabel}`, stage: 5, row: 5, color: '#e67e22', dimNames: ['C', 'd_h'], cache: true, badge: longLabel,
+              desc: `${longLabel} compressed shared-KV history: ${compressedLen.toLocaleString()} complete entries for the current batch (compression ratio ${ratio}:1). Incomplete groups remain in the rolling state and are not causally visible.` },
+        );
+        ops.push(
+            { id: 'compress_tokens', type: 'pool', inputs: ['KV_new', 'compress_state'], output: 'KV_compressed_new', label: `${longLabel} pool`, poolWidth,
+              desc: isC4
+                  ? 'Learned weighted pooling over positions [4j−4, 4j+3], with stride 4. Entry j becomes visible only once position 4j+3 exists.'
+                  : 'Learned weighted pooling over each non-overlapping 128-token group. Entry j becomes visible only once position 128j+127 exists.' },
+            { id: 'cache_compressed', type: 'cache', inputs: ['KV_compressed_new'], output: 'KV_compressed', label: `${longLabel} Cache`, alignX: 'kv_cache',
+              desc: `Append newly completed ${longLabel} entries to the long-range shared-KV cache.` },
+        );
+    }
+
+    let longRangeInput = null;
+    if (isC4) {
+        const k = Math.max(1, Math.min(p.topk || 512, compressedLen || 1));
+        tensors.push(
+            { id: 'W_QI', shape: [D, ni * di], label: 'WqI', stage: 1, row: 7, color: '#7b68ee', dimNames: ['D', 'n_i·d_i'], type: 'weight', checkpointKey: 'indexer.wq',
+              desc: `Lightning-indexer query projection: ${ni} heads × ${di} dims.` },
+            { id: 'Q_I', shape: [ni, S_q, di], label: 'q_I', stage: 4, row: 7, color: '#e74c3c', dimNames: ['n_i', lq, 'd_i'], bytesPerEl: 1,
+              desc: `Compact indexer queries. The indexer scores compressed C4 entries, not native tokens.` },
+            { id: 'W_KI', shape: [d_h, di], label: 'WkI', stage: 5, row: 8, color: '#7b68ee', dimNames: ['d_h', 'd_i'], type: 'weight', checkpointKey: 'indexer.wk',
+              desc: `Projects each compressed shared-KV entry to one ${di}-dimensional index key.` },
+            { id: 'K_I_new', shape: [newCompressedLen, di], label: 'k_I new', stage: 6, row: 8, color: '#2ecc71', dimNames: ['C_new', 'd_i'], bytesPerEl: 0.5, badge: 'FP4',
+              desc: 'Indexer keys for newly completed C4 entries.' },
+            { id: 'K_I', shape: [C, di], label: 'k_I C4', stage: 7, row: 8, color: '#2ecc71', dimNames: ['C', 'd_i'], cache: true, bytesPerEl: 0.5, badge: 'FP4',
+              desc: 'Compressed-history indexer cache. Serving implementations can store this cache in FP4.' },
+            { id: 'W_WI', shape: [D, ni], label: 'Ww', stage: 1, row: 8, color: '#7b68ee', dimNames: ['D', 'n_i'], type: 'weight', checkpointKey: 'indexer.weights_proj',
+              desc: 'Per-query weights for combining the lightning indexer heads.' },
+            { id: 'W_I', shape: [S_q, ni], label: 'w_I', stage: 4, row: 8, color: '#f1c40f', dimNames: [lq, 'n_i'],
+              desc: 'Learned per-query weights for the indexer heads.' },
+            { id: 'idx_scores', shape: [ni, S_q, C], label: 'Index scores', stage: 8, row: 7, color: '#9b59b6', dimNames: ['n_i', lq, 'C'],
+              desc: `Dense but inexpensive relevance scores over the ${compressedLen.toLocaleString()} causally complete C4 entries.` },
+            { id: 'idx_logits', shape: [S_q, C], label: 'I', stage: 9, row: 7, color: '#9b59b6', dimNames: [lq, 'C'],
+              desc: 'Indexer heads combined with ReLU and learned per-query weights.' },
+            { id: 'topk_idx', shape: [S_q, k], label: `top-${p.topk || 512} idx`, stage: 10, row: 7, color: '#f1c40f', dimNames: [lq, 'K_c'], bytesPerEl: 4, badge: 'INT32',
+              desc: `Up to ${p.topk || 512} compressed C4 entries selected per query. Current effective maximum: ${k}.` },
+            { id: 'KV_selected', shape: [S_q, K, d_h], label: 'K=V selected', stage: 11, row: 5, color: '#e67e22', dimNames: [lq, 'K_c', 'd_h'], sramOnly: true, badge: 'GATHERED',
+              desc: 'Per-query selected compressed shared-KV entries, gathered directly into the sparse-attention kernel.' },
+        );
+        ops.push(
+            { id: 'idx_q', type: 'matmul', inputs: ['X', 'W_QI'], output: 'Q_I', label: 'Indexer Q', desc: 'Project compact FP8 indexer queries.' },
+            { id: 'idx_k', type: 'matmul', inputs: ['KV_compressed_new', 'W_KI'], output: 'K_I_new', label: 'Indexer K', desc: 'Project newly completed C4 entries into index keys.' },
+            { id: 'cache_ki', type: 'cache', inputs: ['K_I_new'], output: 'K_I', label: 'Index Cache', alignX: 'kv_cache', desc: 'Append new FP4 index keys to the compressed-history indexer cache.' },
+            { id: 'idx_w', type: 'matmul', inputs: ['X', 'W_WI'], output: 'W_I', label: 'Head weights', desc: 'Produce per-query lightning-indexer head weights.' },
+            { id: 'idx_qk', type: 'matmul', inputs: ['Q_I', 'K_I'], output: 'idx_scores', label: 'Index QKᵀ', desc: 'Score every causally complete compressed C4 entry.' },
+            { id: 'idx_reduce', type: 'relu_wsum', inputs: ['idx_scores', 'W_I'], output: 'idx_logits', label: 'ReLU·w Σ', desc: 'Combine indexer heads into one relevance score per compressed entry.' },
+            { id: 'topk', type: 'topk', inputs: ['idx_logits'], output: 'topk_idx', label: `Top-${p.topk || 512}`, desc: `Select the ${p.topk || 512} highest-scoring causally visible compressed entries per query.` },
+            { id: 'gather_long', type: 'gather', inputs: ['topk_idx', 'KV_compressed'], output: 'KV_selected', label: 'Gather', desc: 'Gather selected C4 shared-KV entries for sparse core attention.' },
+        );
+        longRangeInput = 'KV_selected';
+    } else if (layerType === 'c128') {
+        longRangeInput = 'KV_compressed';
+    }
+
+    tensors.push(
+        { id: 'KV_attended', shape: [S_q, attendedLen, d_h], label: hasCompressor ? 'Local + long K=V' : 'Local K=V', stage: 12, row: 3, color: '#f39c12', dimNames: [lq, 'A', 'd_h'], sramOnly: true,
+          desc: hasCompressor
+              ? `Per-query attention set: up to ${window} native local entries plus ${isC4 ? `${p.topk || 512} selected C4 entries` : 'all causally complete C128 entries'}.`
+              : `Per-query attention set contains only the most recent ${window} uncompressed entries.` },
+        { id: 'scores', shape: [n_h, S_q, attendedLen], label: 'QKᵀ + sink', stage: 13, row: 2, color: '#9b59b6', dimNames: ['n_h', lq, 'A'],
+          desc: 'Attention scores over the concatenated local and long-range shared-KV entries, plus one learned sink logit per head.' },
+        { id: 'sink', shape: [n_h, 1], label: 'Sink', stage: 13, row: 3, color: '#7b68ee', dimNames: ['n_h', '1'], type: 'weight', checkpointKey: 'attn_sink',
+          desc: 'One learned attention-sink logit per query head.' },
+        { id: 'attn', shape: [n_h, S_q, attendedLen], label: 'Attn', stage: 14, row: 2, color: '#9b59b6', dimNames: ['n_h', lq, 'A'], sramOnly: true,
+          desc: 'Softmax weights over the local and long-range attention set.' },
+        { id: 'ctx_head', shape: [n_h, S_q, d_h], label: 'Context', stage: 15, row: 2, color: '#e67e22', dimNames: ['n_h', lq, 'd_h'],
+          desc: 'Per-head weighted sum. Because K=V, positional rotation is also present in the value path.' },
+        { id: 'ctx_unrope', shape: [n_h, S_q, d_h], label: 'R(−i) Context', stage: 16, row: 2, color: '#ff7043', dimNames: ['n_h', lq, 'd_h'], badge: 'INV ROPE',
+          desc: `Inverse RoPE on the trailing ${dr} channels restores translation invariance when keys and values share the same rotated vector.` },
+        { id: 'ctx_flat', shape: [S_q, qWidth], label: 'Context flat', stage: 17, row: 2, color: '#e67e22', dimNames: [lq, 'n_h·d_h'],
+          desc: 'Merge query heads before the grouped low-rank output projection.' },
+        { id: 'W_OA', shape: [qWidth, outRank], label: 'Wo,A grouped', stage: 17, row: 3, color: '#7b68ee', dimNames: ['n_h·d_h', 'r_o'], type: 'weight', checkpointKey: 'o_a_proj',
+          desc: `First grouped low-rank output projection: wide head output → rank ${outRank}.` },
+        { id: 'out_lowrank', shape: [S_q, outRank], label: 'O low-rank', stage: 18, row: 2, color: '#e67e22', dimNames: [lq, 'r_o'], badge: 'GROUPED',
+          desc: 'Grouped low-rank output activation.' },
+        { id: 'W_OB', shape: [outRank, D], label: 'Wo,B', stage: 18, row: 3, color: '#7b68ee', dimNames: ['r_o', 'D'], type: 'weight', checkpointKey: 'o_b_proj',
+          desc: `Expand the grouped low-rank output back to model width D=${D}.` },
+        { id: 'out', shape: [S_q, D], label: 'Out', stage: 19, row: 2, color: '#3498db', dimNames: [lq, 'D'],
+          desc: 'Final attention-layer output.' },
+    );
+
+    ops.push(
+        { id: 'combine_kv', type: 'reshape', inputs: [...(longRangeInput ? [longRangeInput] : []), 'KV_local'], output: 'KV_attended', label: hasCompressor ? 'Concatenate' : 'Select window',
+          desc: hasCompressor ? 'Concatenate the local uncompressed branch with the available long-range branch for each query.' : 'Select the causally visible part of the 128-token local window.' },
+        { id: 'qkt', type: 'matmul', inputs: ['Q_r', 'KV_attended'], output: 'scores', label: 'Q @ Kᵀ + sink', desc: 'Compute per-head scores over the hybrid attention set and append the learned sink logit.' },
+        { id: 'softmax_op', type: 'softmax', inputs: ['scores', 'sink'], output: 'attn', label: 'Softmax', desc: 'Normalize over local entries, long-range entries, and the learned attention sink.' },
+        { id: 'attn_v', type: 'matmul', inputs: ['attn', 'KV_attended'], output: 'ctx_head', label: 'Attn @ shared V', desc: 'Use the same attended vectors as values (K=V).' },
+        { id: 'inverse_rope', type: 'rope', inputs: ['ctx_head'], output: 'ctx_unrope', label: 'Inverse RoPE', desc: 'Rotate the positional slice by −i so the shared K=V output depends only on relative position.' },
+        { id: 'view_out', type: 'reshape', inputs: ['ctx_unrope'], output: 'ctx_flat', label: 'Merge heads', desc: 'Merge attention heads into one wide activation.' },
+        { id: 'out_a', type: 'matmul', inputs: ['ctx_flat', 'W_OA'], output: 'out_lowrank', label: 'Grouped low-rank', desc: 'Grouped low-rank projection avoids a single enormous dense output matrix.' },
+        { id: 'out_proj', type: 'matmul', inputs: ['out_lowrank', 'W_OB'], output: 'out', label: 'Linear', desc: 'Project the low-rank activation back to model width.' },
+    );
+
+    const groups = [
+        { label: 'SHARED K=V + LOCAL BRANCH', color: '#16a085',
+          tensors: ['W_KV', 'KV_new', 'KV_local'], ops: ['proj_kv', 'cache_local'],
+          desc: `All DeepSeek-V4 attention layers use one shared K=V head and retain an uncompressed ${window}-token local cache.` },
+    ];
+    if (hasCompressor) {
+        groups.push({ label: `${longLabel} TOKEN COMPRESSION`, color: '#e67e22', padTop: 40,
+          tensors: ['compress_state', 'KV_compressed_new', 'KV_compressed'], ops: ['compress_tokens', 'cache_compressed'],
+            desc: isC4
+                ? 'Overlapping 8-token learned pooling with stride 4. The rolling state bridges compression boundaries.'
+                : 'Non-overlapping 128-token learned pooling. Every completed compressed entry is retained and attended.' });
+    }
+    if (isC4) {
+        groups.push({ label: 'LIGHTNING INDEXER', color: '#f1c40f', padTop: 40,
+            tensors: ['W_QI', 'Q_I', 'W_KI', 'K_I_new', 'K_I', 'W_WI', 'W_I', 'idx_scores', 'idx_logits', 'topk_idx', 'KV_selected'],
+            ops: ['idx_q', 'idx_k', 'cache_ki', 'idx_w', 'idx_qk', 'idx_reduce', 'topk', 'gather_long'],
+            desc: `The indexer scores the 4×-compressed history and selects at most ${p.topk || 512} entries per query before core attention.` });
+    }
+    groups.push(
+        { label: hasCompressor ? 'HYBRID ATTENTION' : 'LOCAL ATTENTION', color: '#9b59b6', padTop: 40,
+          tensors: ['Q_r', 'KV_attended', 'scores', 'sink', 'attn', 'ctx_head', 'ctx_unrope'],
+          ops: ['combine_kv', 'qkt', 'softmax_op', 'attn_v', 'inverse_rope'],
+          desc: hasCompressor
+              ? `Core attention combines the ${window}-token native branch with ${isC4 ? 'top-k C4 memory' : 'the full C128 compressed history'}.`
+              : `Pure sliding-window attention over at most ${window} native tokens.` },
+        { label: 'GROUPED OUTPUT PROJECTION', color: '#e67e22', padTop: 40,
+          tensors: ['ctx_flat', 'W_OA', 'out_lowrank', 'W_OB', 'out'], ops: ['view_out', 'out_a', 'out_proj'],
+          desc: `A grouped rank-${outRank} bottleneck maps the very wide ${qWidth}-dimensional head output back to D=${D}.` },
+    );
+
+    const label = layerType === 'c4'
+        ? 'DeepSeek-V4 — C4 Compressed Sparse Attention'
+        : layerType === 'c128'
+            ? 'DeepSeek-V4 — C128 Heavily Compressed Attention'
+            : 'DeepSeek-V4 — Sliding-Window Attention';
+    return { id: `dsv4_${layerType}`, label, tensors, ops, groups };
 }

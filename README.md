@@ -20,6 +20,7 @@ operations.
 | **MQA** | All query heads sharing one KV head |
 | **MLA** | Compressed KV latents and side-by-side up-projected and absorbed paths |
 | **DSA** | MLA with a lightning indexer, causal top-k selection, and sparse core attention |
+| **CSA (DeepSeek-V4)** | C4 compressed-sparse, C128 heavily-compressed, and local-only SWA layers |
 
 Presets cover representative GPT-2, Llama, Mistral, Qwen, Gemma, Phi, Command,
 StarCoder, and DeepSeek configurations.
@@ -29,12 +30,14 @@ StarCoder, and DeepSeek configurations.
 - Interactive tensor shapes, operation graphs, tooltips, and click-through detail views
 - Independent per-request context (`S`) and query (`S_q`) lengths for mixed batches
 - Prefill, extend, speculative-decode, and decode workload visualization
+- One-click workload presets, including a mixed packed batch
 - FlashAttention, PagedAttention, and sliding-window attention overlays
 - Tensor-parallel and data-parallel layouts, including TP collective traffic
 - KV-cache size, paged-block occupancy, and variant-specific derived values
 - FLOPs, HBM traffic, arithmetic intensity, and ideal roofline lower bounds for
   A100, H100, B200, and B300
 - MLA path crossover analysis and DSA dense-fallback visibility
+- DeepSeek-V4 compression boundaries, local 128-token branch, shared K=V, and inverse RoPE
 - Searchable glossary and shareable, URL-encoded view state
 
 ## Run locally
@@ -60,8 +63,8 @@ all graph construction, rendering, and cost calculations run in the browser.
 5. Scroll to zoom, drag to pan, and double-click to fit the graph to the viewport.
 6. Select **Copy link** to share the exact configuration.
 
-DSA uses its own fused sparse-attention path, so the FlashAttention and
-sliding-window controls do not apply to that view. PagedAttention changes cache
+DSA and DeepSeek-V4 use dedicated attention paths, so the FlashAttention and
+sliding-window controls do not apply to those views. PagedAttention changes cache
 layout and block accounting; it does not change the mathematical attention result.
 
 ## Performance model
