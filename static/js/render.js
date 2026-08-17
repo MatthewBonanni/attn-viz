@@ -1067,7 +1067,7 @@ export function drawOpNode(g, op, onClick) {
     return group;
 }
 
-function opColor(type) {
+export function opColor(type) {
     const colors = {
         matmul: '#e74c3c', mask: '#1abc9c', softmax: '#f39c12',
         broadcast: '#3498db', reshape: '#95a5a6',
@@ -1075,11 +1075,14 @@ function opColor(type) {
         rope: '#ff7043', add: '#3498db',
         cache: '#16a085', flash_attn: '#ff6b6b',
         topk: '#f1c40f', gather: '#16a085', relu_wsum: '#f39c12',
+        shortconv: '#4a90d9', normalize: '#9b59b6',
+        selective_state_update: '#16a085', gated_delta_update: '#16a085',
+        state_read: '#e67e22', elementwise: '#f1c40f',
     };
     return colors[type] || '#95a5a6';
 }
 
-function opSymbol(type) {
+export function opSymbol(type) {
     const symbols = {
         matmul: '×', mask: '▽', softmax: 'σ',
         broadcast: '⧉', reshape: '⧉',
@@ -1087,6 +1090,9 @@ function opSymbol(type) {
         rope: '⟳', add: '+',
         cache: '⤓', flash_attn: '\u26A1',
         topk: '⊤', gather: '⤵', relu_wsum: 'Σ',
+        shortconv: '∗', normalize: '∥',
+        selective_state_update: '↻', gated_delta_update: 'Δ',
+        state_read: '↗', elementwise: '⊙',
     };
     return symbols[type] || '?';
 }

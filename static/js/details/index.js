@@ -13,6 +13,13 @@ import { drawReluWsumDetail } from './relu-wsum.js';
 import { drawGatherDetail } from './gather.js';
 import { drawAddDetail } from './add.js';
 import { drawSoftmaxOpDetail } from './softmax.js';
+import {
+    drawGateDetail,
+    drawNormalizeDetail,
+    drawShortConvDetail,
+    drawStateReadDetail,
+    drawStateUpdateDetail,
+} from './recurrent.js';
 import { computeOpCost, tensorElements, tensorBytes, fmtNum, fmtBytes, computeRooflineThreshold, GPU_SPECS } from '../costs.js';
 
 // Track currently displayed detail for live refresh
@@ -20,9 +27,34 @@ let _currentDetail = null;  // { type: 'op'|'tensor'|'group', id, graphId }
 let _currentWide = false;
 
 // Re-evaluate overlay visibility on resize when flash panel is open
-window.addEventListener('resize', () => {
-    if (_currentWide) _shiftStatsOverlay(true, true);
-});
+if (typeof window !== 'undefined') {
+    window.addEventListener('resize', () => {
+        if (_currentWide) _shiftStatsOverlay(true, true);
+    });
+}
+
+export const OP_DETAIL_DRAWERS = {
+    flash_attn: drawFlashAttnDetail,
+    matmul: drawMatmulDetail,
+    compress: drawMatmulDetail,
+    decompress: drawMatmulDetail,
+    mask: drawMaskDetail,
+    broadcast: drawBroadcastDetail,
+    reshape: drawBroadcastDetail,
+    rope: drawRopeDetail,
+    topk: drawTopkDetail,
+    relu_wsum: drawReluWsumDetail,
+    cache: drawCacheOpDetail,
+    gather: drawGatherDetail,
+    add: drawAddDetail,
+    softmax: drawSoftmaxOpDetail,
+    shortconv: drawShortConvDetail,
+    normalize: drawNormalizeDetail,
+    selective_state_update: drawStateUpdateDetail,
+    gated_delta_update: drawStateUpdateDetail,
+    state_read: drawStateReadDetail,
+    elementwise: drawGateDetail,
+};
 
 export function showDetail(op, graph, params) {
     if (_currentDetail && _currentDetail.type === 'op' && _currentDetail.id === op.id) {
@@ -137,46 +169,8 @@ function _renderOpDetail(op, graph, params) {
     svg.selectAll('*').remove();
     svg.attr('height', 350);
 
-    switch (op.type) {
-        case 'flash_attn':
-            drawFlashAttnDetail(svg, op, tensorMap, params);
-            break;
-        case 'matmul':
-        case 'compress':
-        case 'decompress':
-            drawMatmulDetail(svg, op, tensorMap, params);
-            break;
-        case 'mask':
-            drawMaskDetail(svg, op, tensorMap, params);
-            break;
-        case 'broadcast':
-        case 'reshape':
-            drawBroadcastDetail(svg, op, tensorMap, params);
-            break;
-        case 'rope':
-            drawRopeDetail(svg, op, tensorMap, params);
-            break;
-        case 'topk':
-            drawTopkDetail(svg, op, tensorMap, params);
-            break;
-        case 'relu_wsum':
-            drawReluWsumDetail(svg, op, tensorMap, params);
-            break;
-        case 'cache':
-            drawCacheOpDetail(svg, op, tensorMap, params);
-            break;
-        case 'gather':
-            drawGatherDetail(svg, op, tensorMap, params);
-            break;
-        case 'add':
-            drawAddDetail(svg, op, tensorMap, params);
-            break;
-        case 'softmax':
-            drawSoftmaxOpDetail(svg, op, tensorMap, params);
-            break;
-        default:
-            drawGenericDetail(svg, op, tensorMap);
-    }
+    const drawDetail = OP_DETAIL_DRAWERS[op.type] || drawGenericDetail;
+    drawDetail(svg, op, tensorMap, params);
 }
 
 export function showTensorDetail(tensor, params) {

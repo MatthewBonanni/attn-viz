@@ -1,17 +1,20 @@
-# Attention Mechanism Visualizer
+# Attention & Linear Mixer Visualizer
 
 **Try it:** https://matthewbonanni.github.io/attn-viz/
 
-An interactive, tensor-level visualization of transformer attention. It renders
-tensors and operations as isometric 3D blocks, updates shapes and costs as model
-and runtime parameters change, and provides detailed diagrams for individual
-operations.
+An interactive, tensor-level visualization of attention and linear recurrent
+sequence mixers. It renders tensors and operations as isometric 3D blocks,
+updates shapes and costs as model and runtime parameters change, and provides
+detailed diagrams for individual operations.
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
 ![Flask](https://img.shields.io/badge/flask-3.x-green)
 ![D3.js](https://img.shields.io/badge/d3.js-v7-orange)
 
-## Supported attention variants
+## Supported mechanisms
+
+The mechanism selector separates token-to-token **Attention** from fixed-state
+**Linear** mixers so their different memory models stay explicit.
 
 | Variant | What the visualizer shows |
 | --- | --- |
@@ -22,8 +25,13 @@ operations.
 | **DSA** | MLA with a lightning indexer, causal top-k selection, and sparse core attention |
 | **CSA (DeepSeek-V4)** | C4 compressed-sparse, C128 heavily-compressed, and local-only SWA layers |
 
+| Linear variant | What the visualizer shows |
+| --- | --- |
+| **Mamba** | Local causal convolution, input-dependent Δ/B/C parameters, selective scan, fixed SSM state, and output gate |
+| **Gated DeltaNet** | Convolved and normalized Q/K/V, α/β gates, matrix-state delta update, state read, and output gate |
+
 Presets cover representative GPT-2, Llama, Mistral, Qwen, Gemma, Phi, Command,
-StarCoder, and DeepSeek configurations.
+StarCoder, DeepSeek, and Mamba configurations, plus the Gated DeltaNet paper block.
 
 ## Features
 
@@ -31,7 +39,7 @@ StarCoder, and DeepSeek configurations.
 - Independent per-request context (`S`) and query (`S_q`) lengths for mixed batches
 - Prefill, extend, speculative-decode, and decode workload visualization
 - One-click workload presets, including a mixed packed batch
-- FlashAttention, PagedAttention, and sliding-window attention overlays
+- FlashAttention, PagedAttention, recurrent state-page, and sliding-window overlays
 - Tensor-parallel and data-parallel layouts, including TP collective traffic
 - KV-cache size, paged-block occupancy, and variant-specific derived values
 - FLOPs, HBM traffic, arithmetic intensity, and ideal roofline lower bounds for
@@ -56,7 +64,7 @@ all graph construction, rendering, and cost calculations run in the browser.
 
 ## Use the visualizer
 
-1. Choose an attention variant or model preset.
+1. Choose Attention or Linear, then select a variant or model preset.
 2. Set the architecture dimensions and the batch's per-request `S` and `S_q` values.
 3. Adjust TP/DP ranks or enable FlashAttention, PagedAttention, or sliding-window attention.
 4. Click a tensor, operation, or outlined group for its detailed explanation.
@@ -64,8 +72,12 @@ all graph construction, rendering, and cost calculations run in the browser.
 6. Select **Copy link** to share the exact configuration.
 
 DSA and DeepSeek-V4 use dedicated attention paths, so the FlashAttention and
-sliding-window controls do not apply to those views. PagedAttention changes cache
-layout and block accounting; it does not change the mathematical attention result.
+sliding-window controls do not apply to those views. In an attention view,
+PagedAttention maps tokens to KV-cache slots. In a linear view, the control becomes
+**Paged state cache**: a block-table entry selects a whole recurrent-state snapshot,
+not a token-level KV slot. Prefix caching can retain snapshots at token-block
+boundaries; when attention and recurrent layers share a model, serving runtimes may
+pad and align their page sizes so both use the same block pool.
 
 ## Performance model
 
@@ -104,8 +116,8 @@ npm test
 ```
 
 The tests cover mixed-request batching, exact sliding-window and DSA pair counts,
-DP critical-rank selection, TP communication, compact GQA storage, and per-operation
-roofline aggregation.
+fixed recurrent-state invariants, linear token scaling, URL state, DP critical-rank
+selection, TP communication, compact GQA storage, and per-operation roofline aggregation.
 
 ## Project structure
 
@@ -119,11 +131,12 @@ roofline aggregation.
 │   ├── preview.png           # Social preview image
 │   └── js/
 │       ├── main.js           # Controls, presets, state, and update loop
-│       ├── graphs.js         # Attention graph definitions
+│       ├── graphs.js         # Attention and linear-mixer graph definitions
 │       ├── render.js         # Isometric SVG layout and rendering
 │       ├── costs.js          # Operation costs and roofline estimates
 │       ├── url-state.js      # Shareable URL serialization
 │       └── details/          # Tensor and operation detail visualizations
 └── tests/
-    └── costs.test.js         # Cost-model regression tests
+    ├── costs.test.js         # Cost-model regression tests
+    └── linear.test.js        # Linear-state and scaling invariants
 ```

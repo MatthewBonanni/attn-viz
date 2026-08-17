@@ -9,11 +9,144 @@ export const VARIANT_DESCS = {
     mla: `<b>Multi-Head Latent Attention</b> (DeepSeek-V2, 2024) — Compresses KV representations via a low-rank bottleneck. Instead of caching full K, V tensors (size n_h · d_h per token), caches a compressed latent c_kv of size d_c ≪ n_h · d_h. During inference, the <b>up-projected</b> path is used for compute-bound <em>prefills</em>, while the <b>absorbed</b> path is used for memory-bandwidth-bound <em>decodes</em>. Both are shown below.`,
     dsa: `<b>DeepSeek Sparse Attention</b> (DeepSeek-V3.2, 2025) — MLA plus a learned <b>lightning indexer</b>: a small FP8 scorer (n_i heads of d_i dims, MQA-style shared key) that rates every cached token per query, then keeps only the <b>top-k</b> (k=2048). Core attention runs in MLA's absorbed (MQA-style) form over just those k tokens — for both prefill and decode — cutting attention cost from O(S) to O(k) per query at long context.`,
     dsv4: `<b>DeepSeek-V4 hybrid attention</b> (2026) — Decoder blocks choose one of three layer types. <b>C4</b> uses overlapping 8-token pooling at stride 4, a lightning indexer, and top-512 compressed entries. <b>C128</b> pools non-overlapping groups of 128 and attends to the full compressed history. Both add an uncompressed 128-token local branch; <b>SWA</b> layers keep only that local branch. Keys and values are shared (K=V), with inverse RoPE applied to the attention output.`,
+    mamba: `<b>Mamba</b> (Gu & Dao, 2023) — A selective state-space mixer, not Q/K/V attention. Each token chooses input-dependent step, write, and read parameters (Δ, B, C), updates a fixed-size recurrent state, and gates the result. Work grows linearly with the number of new tokens; inference state does not grow with context length.`,
+    gated_delta: `<b>Gated DeltaNet</b> (Yang et al., 2025) — A linear recurrent mixer with a matrix-valued associative memory. A forget gate α can clear old state, while the delta rule β selectively replaces the value associated with the current key. Q/K/V are used to read and update a fixed-size state—not to form an S_q × S attention matrix.`,
 };
 
 // Dim label helpers: when B > 1, S_q/S labels become ΣS_q/ΣS
 function sqLabel(B) { return B > 1 ? '\u03a3S_q' : 'S_q'; }
 function sLabel(B)  { return B > 1 ? '\u03a3S' : 'S'; }
+
+// --- Linear / recurrent sequence mixers ---
+
+export function mambaGraph(p) {
+    const B = p.B || 1;
+    const S_q = p.sumSq || p.S_q || p.S;
+    const D = p.d_model || 2560;
+    const expand = p.expand || 2;
+    const dInner = D * expand;
+    const dState = p.d_state || 16;
+    const dConv = p.d_conv || 4;
+    const dtRank = Math.ceil(D / 16);
+    const lq = sqLabel(B);
+    return {
+        id: 'mamba', label: 'Mamba selective SSM',
+        tensors: [
+            { id: 'X', shape: [S_q, D], label: 'X', stage: 0, row: 2, color: '#4a90d9', dimNames: [lq, 'D'],
+              desc: 'Input tokens from the residual stream. Only the new S_q tokens are processed; prior context is summarized by the recurrent states.' },
+            { id: 'W_x', shape: [D, dInner], label: 'W_x', stage: 1, row: 0, color: '#7b68ee', dimNames: ['D', 'E·D'], type: 'weight', checkpointKey: 'in_proj[:d_inner]',
+              desc: `Input projection for the selective SSM branch. E·D = ${expand} × ${D} = ${dInner}.` },
+            { id: 'W_z', shape: [D, dInner], label: 'W_z', stage: 1, row: 4, color: '#7b68ee', dimNames: ['D', 'E·D'], type: 'weight', checkpointKey: 'in_proj[d_inner:]',
+              desc: 'Input projection for the multiplicative output gate.' },
+            { id: 'x_raw', shape: [S_q, dInner], label: 'x', stage: 2, row: 0, color: '#4a90d9', dimNames: [lq, 'E·D'], desc: 'Expanded SSM-branch activations.' },
+            { id: 'z', shape: [S_q, dInner], label: 'z', stage: 2, row: 4, color: '#f1c40f', dimNames: [lq, 'E·D'], desc: 'Expanded output-gate activations.' },
+            { id: 'W_conv', shape: [dInner, dConv], label: 'Conv w', stage: 2, row: 1, color: '#7b68ee', dimNames: ['E·D', 'K'], type: 'weight', checkpointKey: 'conv1d.weight',
+              desc: `Depthwise causal convolution weights, width K=${dConv}.` },
+            { id: 'conv_state', shape: [B, dInner, dConv], label: 'Conv state', stage: 2, row: 2, color: '#16a085', dimNames: ['B', 'E·D', 'K'], state: true, badge: 'FIXED',
+              desc: `The last ${dConv} projected inputs per request. Fixed-size decode state; it does not grow with S.` },
+            { id: 'x_conv', shape: [S_q, dInner], label: 'x̃', stage: 3, row: 0, color: '#4a90d9', dimNames: [lq, 'E·D'], desc: 'Locally mixed activations after depthwise causal convolution and SiLU.' },
+            { id: 'W_dt', shape: [dInner, dtRank], label: 'W_Δ↓', stage: 3, row: 1, color: '#7b68ee', dimNames: ['E·D', 'r_Δ'], type: 'weight', checkpointKey: 'x_proj[:dt_rank]', desc: `Low-rank step-size projection, r_Δ=ceil(D/16)=${dtRank}.` },
+            { id: 'W_B', shape: [dInner, dState], label: 'W_B', stage: 3, row: 2, color: '#7b68ee', dimNames: ['E·D', 'N'], type: 'weight', checkpointKey: 'x_proj[dt_rank:dt_rank+d_state]', desc: 'Projects each token to the input-dependent SSM write vector B_t.' },
+            { id: 'W_C', shape: [dInner, dState], label: 'W_C', stage: 3, row: 3, color: '#7b68ee', dimNames: ['E·D', 'N'], type: 'weight', checkpointKey: 'x_proj[-d_state:]', desc: 'Projects each token to the input-dependent SSM read vector C_t.' },
+            { id: 'dt_low', shape: [S_q, dtRank], label: 'Δ_low', stage: 4, row: 1, color: '#f1c40f', dimNames: [lq, 'r_Δ'], desc: 'Low-rank token-dependent step sizes.' },
+            { id: 'B_t', shape: [S_q, dState], label: 'B_t', stage: 4, row: 2, color: '#2ecc71', dimNames: [lq, 'N'], desc: 'Token-dependent write direction shared across expanded channels.' },
+            { id: 'C_t', shape: [S_q, dState], label: 'C_t', stage: 4, row: 3, color: '#e74c3c', dimNames: [lq, 'N'], desc: 'Token-dependent read direction shared across expanded channels.' },
+            { id: 'W_dt_up', shape: [dtRank, dInner], label: 'W_Δ↑', stage: 4, row: 0, color: '#7b68ee', dimNames: ['r_Δ', 'E·D'], type: 'weight', checkpointKey: 'dt_proj', desc: 'Expands token-dependent step sizes to every SSM channel.' },
+            { id: 'delta', shape: [S_q, dInner], label: 'Δ_t', stage: 5, row: 0, color: '#f1c40f', dimNames: [lq, 'E·D'], desc: 'Positive, input-dependent discretization step after softplus.' },
+            { id: 'A', shape: [dInner, dState], label: 'A', stage: 5, row: 1, color: '#7b68ee', dimNames: ['E·D', 'N'], type: 'weight', checkpointKey: 'A_log', desc: 'Learned continuous-time transition rates; discretized using Δ_t for every token.' },
+            { id: 'h_prev', shape: [B, dInner, dState], label: 'h_{t−1}', stage: 5, row: 2, color: '#16a085', dimNames: ['B', 'E·D', 'N'], state: true, badge: 'FIXED', desc: 'Selective SSM state entering this call. One fixed-size state per request and layer.' },
+            { id: 'h_next', shape: [B, dInner, dState], label: 'h_t', stage: 7, row: 2, color: '#16a085', dimNames: ['B', 'E·D', 'N'], state: true, badge: 'FIXED', desc: 'Final SSM state after scanning the new tokens. Intermediate per-token states stay inside the scan kernel; only this final state is retained for decode.' },
+            { id: 'D_skip', shape: [dInner], label: 'D', stage: 6, row: 4, color: '#7b68ee', dimNames: ['E·D'], type: 'weight', checkpointKey: 'D', desc: 'Learned direct skip from the locally convolved input to the SSM output.' },
+            { id: 'y_ssm', shape: [S_q, dInner], label: 'y', stage: 8, row: 2, color: '#e67e22', dimNames: [lq, 'E·D'], desc: 'Sequence output read from the evolving state with C_t, plus the learned D skip.' },
+            { id: 'y_gate', shape: [S_q, dInner], label: 'y ⊙ SiLU(z)', stage: 9, row: 2, color: '#e67e22', dimNames: [lq, 'E·D'], desc: 'Selective SSM output modulated by the parallel input gate.' },
+            { id: 'W_O', shape: [dInner, D], label: 'Wo', stage: 9, row: 3, color: '#7b68ee', dimNames: ['E·D', 'D'], type: 'weight', checkpointKey: 'out_proj', desc: 'Projects the expanded gated output back to model width.' },
+            { id: 'out', shape: [S_q, D], label: 'Out', stage: 10, row: 2, color: '#3498db', dimNames: [lq, 'D'], desc: 'Final Mamba mixer output returned to the residual stream.' },
+        ],
+        ops: [
+            { id: 'proj_x', type: 'matmul', inputs: ['X', 'W_x'], output: 'x_raw', label: 'Linear', desc: 'Project into the expanded selective-SSM branch.' },
+            { id: 'proj_z', type: 'matmul', inputs: ['X', 'W_z'], output: 'z', label: 'Linear', desc: 'Project the parallel output-gate branch.' },
+            { id: 'shortconv', type: 'shortconv', inputs: ['x_raw', 'W_conv', 'conv_state'], output: 'x_conv', label: 'Causal conv + SiLU', convWidth: dConv, desc: `Depthwise causal convolution of width ${dConv}, followed by SiLU. At decode it reads and advances a fixed ${dConv}-token convolution state.` },
+            { id: 'proj_dt', type: 'matmul', inputs: ['x_conv', 'W_dt'], output: 'dt_low', label: 'Linear', desc: 'Produce low-rank input-dependent step sizes.' },
+            { id: 'proj_B', type: 'matmul', inputs: ['x_conv', 'W_B'], output: 'B_t', label: 'Linear', desc: 'Produce input-dependent SSM write vectors B_t.' },
+            { id: 'proj_C', type: 'matmul', inputs: ['x_conv', 'W_C'], output: 'C_t', label: 'Linear', desc: 'Produce input-dependent SSM read vectors C_t.' },
+            { id: 'proj_delta', type: 'matmul', inputs: ['dt_low', 'W_dt_up'], output: 'delta', label: 'Linear + softplus', desc: 'Expand and constrain Δ_t positive before discretizing the state transition.' },
+            { id: 'selective_update', type: 'selective_state_update', inputs: ['x_conv', 'delta', 'B_t', 'A', 'h_prev'], output: 'h_next', label: 'Selective scan', desc: 'For each new token, discretize A and B with Δ_t and update h_t = Ā_t ⊙ h_{t−1} + B̄_t ⊙ x_t. Prefill uses a hardware-aware scan; decode performs one recurrent step.' },
+            { id: 'state_read', type: 'state_read', inputs: ['h_next', 'C_t', 'x_conv', 'D_skip'], output: 'y_ssm', label: 'Read state', desc: 'At each token, read the evolving state with C_t and add the learned direct path D ⊙ x_t. The diagram shows the retained final state, while the scan produces every y_t.' },
+            { id: 'output_gate', type: 'elementwise', inputs: ['y_ssm', 'z'], output: 'y_gate', label: 'SiLU gate', flopsPerElement: 5, desc: 'Apply the parallel multiplicative gate: y ⊙ SiLU(z).' },
+            { id: 'out_proj', type: 'matmul', inputs: ['y_gate', 'W_O'], output: 'out', label: 'Linear', desc: 'Project the expanded mixer output back to model width.' },
+        ],
+        groups: [
+            { label: 'LOCAL MIXING & SELECTION', color: '#4a90d9', tensors: ['W_x', 'x_raw', 'W_conv', 'conv_state', 'x_conv', 'W_dt', 'W_B', 'W_C', 'dt_low', 'B_t', 'C_t', 'W_dt_up', 'delta'], ops: ['proj_x', 'shortconv', 'proj_dt', 'proj_B', 'proj_C', 'proj_delta'], desc: 'Mamba first adds a short local convolution, then derives Δ_t, B_t, and C_t from the current token. These input-dependent parameters decide how quickly each channel forgets, what it writes, and how it reads.' },
+            { label: 'FIXED-SIZE RECURRENT STATE', color: '#16a085', padTop: 36, tensors: ['A', 'h_prev', 'h_next', 'D_skip', 'y_ssm'], ops: ['selective_update', 'state_read'], desc: `The SSM state is [E·D, N] = [${dInner}, ${dState}] per request. Unlike a KV cache, its size is independent of context length S. Work is linear in the number of new tokens.` },
+            { label: 'OUTPUT GATE', color: '#e67e22', padTop: 36, tensors: ['W_z', 'z', 'y_gate', 'W_O', 'out'], ops: ['proj_z', 'output_gate', 'out_proj'], desc: 'A parallel SiLU gate controls which recurrent features return to the residual stream.' },
+        ],
+    };
+}
+
+export function gatedDeltaGraph(p) {
+    const B = p.B || 1;
+    const S_q = p.sumSq || p.S_q || p.S;
+    const D = p.d_model || 2048;
+    const n_h = p.n_h || 16;
+    const d_k = p.d_h || 128;
+    const expandV = p.expand_v || 2;
+    const d_v = d_k * expandV;
+    const dConv = p.d_conv || 4;
+    const keyDim = n_h * d_k;
+    const valueDim = n_h * d_v;
+    const lq = sqLabel(B);
+    return {
+        id: 'gated_delta', label: 'Gated DeltaNet',
+        tensors: [
+            { id: 'X', shape: [S_q, D], label: 'X', stage: 0, row: 3, color: '#4a90d9', dimNames: [lq, 'D'], desc: 'Input tokens. Prior context is represented by the recurrent matrix state rather than a token-by-token KV cache.' },
+            { id: 'W_Q', shape: [D, keyDim], label: 'Wq', stage: 1, row: 0, color: '#7b68ee', dimNames: ['D', 'n_h·d_k'], type: 'weight', checkpointKey: 'q_proj', desc: 'Query projection for reading the associative state.' },
+            { id: 'W_K', shape: [D, keyDim], label: 'Wk', stage: 1, row: 1, color: '#7b68ee', dimNames: ['D', 'n_h·d_k'], type: 'weight', checkpointKey: 'k_proj', desc: 'Key projection selecting which association to update.' },
+            { id: 'W_V', shape: [D, valueDim], label: 'Wv', stage: 1, row: 2, color: '#7b68ee', dimNames: ['D', 'n_h·d_v'], type: 'weight', checkpointKey: 'v_proj', desc: 'Value projection containing the new association value.' },
+            { id: 'W_AB', shape: [D, 2 * n_h], label: 'Wαβ', stage: 1, row: 4, color: '#7b68ee', dimNames: ['D', '2n_h'], type: 'weight', checkpointKey: 'a_proj + b_proj', desc: 'Per-head projections for forget gate α and write-strength β.' },
+            { id: 'W_G', shape: [D, valueDim], label: 'Wg', stage: 1, row: 5, color: '#7b68ee', dimNames: ['D', 'n_h·d_v'], type: 'weight', checkpointKey: 'g_proj', desc: 'Output gate projection.' },
+            { id: 'q_raw', shape: [n_h, S_q, d_k], label: 'q', stage: 2, row: 0, color: '#e74c3c', dimNames: ['n_h', lq, 'd_k'], desc: 'Raw per-head query vectors.' },
+            { id: 'k_raw', shape: [n_h, S_q, d_k], label: 'k', stage: 2, row: 1, color: '#2ecc71', dimNames: ['n_h', lq, 'd_k'], desc: 'Raw per-head key vectors.' },
+            { id: 'v_raw', shape: [n_h, S_q, d_v], label: 'v', stage: 2, row: 2, color: '#f39c12', dimNames: ['n_h', lq, 'd_v'], desc: 'Raw per-head value vectors.' },
+            { id: 'alpha_beta', shape: [S_q, 2 * n_h], label: 'α, β', stage: 2, row: 4, color: '#f1c40f', dimNames: [lq, '2n_h'], desc: 'α controls global state decay; β controls targeted delta-rule replacement.' },
+            { id: 'gate', shape: [n_h, S_q, d_v], label: 'g', stage: 2, row: 5, color: '#f1c40f', dimNames: ['n_h', lq, 'd_v'], desc: 'Per-head output gate.' },
+            { id: 'q_conv', shape: [n_h, S_q, d_k], label: 'q̃', stage: 3, row: 0, color: '#e74c3c', dimNames: ['n_h', lq, 'd_k'], desc: 'Query after short causal convolution and SiLU.' },
+            { id: 'k_conv', shape: [n_h, S_q, d_k], label: 'k̃', stage: 3, row: 1, color: '#2ecc71', dimNames: ['n_h', lq, 'd_k'], desc: 'Key after short causal convolution and SiLU.' },
+            { id: 'v', shape: [n_h, S_q, d_v], label: 'ṽ', stage: 3, row: 2, color: '#f39c12', dimNames: ['n_h', lq, 'd_v'], desc: 'Value after short causal convolution and SiLU.' },
+            { id: 'conv_state', shape: [B, 2 * keyDim + valueDim, Math.max(1, dConv - 1)], label: 'Conv state', stage: 2, row: 6, color: '#16a085', dimNames: ['B', '2d_k+d_v', 'K−1'], state: true, badge: 'FIXED', desc: `Recent Q/K/V projection history for the short convolutions. It keeps ${Math.max(1, dConv - 1)} prior positions per channel and is stored beside the matrix state.` },
+            { id: 'q', shape: [n_h, S_q, d_k], label: 'q̂', stage: 4, row: 0, color: '#e74c3c', dimNames: ['n_h', lq, 'd_k'], desc: 'L2-normalized query. Normalization stabilizes the recurrent update and read.' },
+            { id: 'k', shape: [n_h, S_q, d_k], label: 'k̂', stage: 4, row: 1, color: '#2ecc71', dimNames: ['n_h', lq, 'd_k'], desc: 'L2-normalized key defining the association to replace.' },
+            { id: 'S_prev', shape: [B, n_h, d_v, d_k], label: 'S_{t−1}', stage: 5, row: 2, color: '#16a085', dimNames: ['B', 'n_h', 'd_v', 'd_k'], state: true, badge: 'FIXED', desc: 'Matrix-valued associative memory entering this call. Its size is fixed per request and layer.' },
+            { id: 'S_next', shape: [B, n_h, d_v, d_k], label: 'S_t', stage: 7, row: 2, color: '#16a085', dimNames: ['B', 'n_h', 'd_v', 'd_k'], state: true, badge: 'FIXED', desc: 'Final associative state after scanning the new tokens. Only the final state is retained for future decode steps.' },
+            { id: 'y', shape: [n_h, S_q, d_v], label: 'S_t q̂_t', stage: 8, row: 2, color: '#e67e22', dimNames: ['n_h', lq, 'd_v'], desc: 'Values retrieved from the evolving matrix state with the normalized queries.' },
+            { id: 'y_gate', shape: [n_h, S_q, d_v], label: 'Norm(y) ⊙ SiLU(g)', stage: 9, row: 2, color: '#e67e22', dimNames: ['n_h', lq, 'd_v'], desc: 'Normalized recurrent output modulated by the learned output gate.' },
+            { id: 'y_flat', shape: [S_q, valueDim], label: 'Y', stage: 10, row: 2, color: '#e67e22', dimNames: [lq, 'n_h·d_v'], desc: 'Per-head outputs viewed as one expanded value dimension.' },
+            { id: 'W_O', shape: [valueDim, D], label: 'Wo', stage: 10, row: 3, color: '#7b68ee', dimNames: ['n_h·d_v', 'D'], type: 'weight', checkpointKey: 'o_proj', desc: 'Output projection back to model width.' },
+            { id: 'out', shape: [S_q, D], label: 'Out', stage: 11, row: 2, color: '#3498db', dimNames: [lq, 'D'], desc: 'Final Gated DeltaNet mixer output.' },
+        ],
+        ops: [
+            { id: 'proj_q', type: 'matmul', inputs: ['X', 'W_Q'], output: 'q_raw', label: 'Linear', desc: 'Project queries and view them as independent heads.' },
+            { id: 'proj_k', type: 'matmul', inputs: ['X', 'W_K'], output: 'k_raw', label: 'Linear', desc: 'Project keys and view them as independent heads.' },
+            { id: 'proj_v', type: 'matmul', inputs: ['X', 'W_V'], output: 'v_raw', label: 'Linear', desc: 'Project expanded values and view them as independent heads.' },
+            { id: 'proj_ab', type: 'matmul', inputs: ['X', 'W_AB'], output: 'alpha_beta', label: 'α, β gates', desc: 'Produce one forget gate α and write-strength β per token and head.' },
+            { id: 'proj_g', type: 'matmul', inputs: ['X', 'W_G'], output: 'gate', label: 'Linear', desc: 'Project the multiplicative output gate.' },
+            { id: 'conv_q', type: 'shortconv', inputs: ['q_raw', 'conv_state'], output: 'q_conv', label: 'Short conv + SiLU', convWidth: dConv, desc: `Apply a depthwise causal convolution of width ${dConv} and SiLU to queries. The Q/K/V short-convolution histories are packed into one fixed-size state page component.` },
+            { id: 'conv_k', type: 'shortconv', inputs: ['k_raw'], output: 'k_conv', label: 'Short conv + SiLU', convWidth: dConv, desc: `Apply a depthwise causal convolution of width ${dConv} and SiLU to keys.` },
+            { id: 'conv_v', type: 'shortconv', inputs: ['v_raw'], output: 'v', label: 'Short conv + SiLU', convWidth: dConv, desc: `Apply a depthwise causal convolution of width ${dConv} and SiLU to values.` },
+            { id: 'norm_q', type: 'normalize', inputs: ['q_conv'], output: 'q', label: 'L2 norm', desc: 'Normalize each query vector to unit length.' },
+            { id: 'norm_k', type: 'normalize', inputs: ['k_conv'], output: 'k', label: 'L2 norm', desc: 'Normalize each key vector to unit length.' },
+            { id: 'delta_update', type: 'gated_delta_update', inputs: ['S_prev', 'k', 'v', 'alpha_beta'], output: 'S_next', label: 'Gated delta scan', desc: 'For each token: decay state with α, read the old value at k, then use β to replace that association with v. This targeted update avoids constructing an attention matrix.' },
+            { id: 'state_read', type: 'state_read', inputs: ['S_next', 'q'], output: 'y', label: 'Read state', desc: 'Retrieve the value associated with q from the evolving matrix state. Prefill uses a chunkwise parallel form; decode performs one recurrent step.' },
+            { id: 'norm_gate', type: 'elementwise', inputs: ['y', 'gate'], output: 'y_gate', label: 'Norm + SiLU gate', flopsPerElement: 8, desc: 'Normalize the recurrent output and modulate it with SiLU(g).' },
+            { id: 'view_out', type: 'reshape', inputs: ['y_gate'], output: 'y_flat', label: 'View', desc: 'Merge the head and value dimensions without moving data.' },
+            { id: 'out_proj', type: 'matmul', inputs: ['y_flat', 'W_O'], output: 'out', label: 'Linear', desc: 'Project the expanded recurrent output back to model width.' },
+        ],
+        groups: [
+            { label: 'TOKEN-DEPENDENT CONTROLS', color: '#4a90d9', tensors: ['W_Q', 'W_K', 'W_V', 'W_AB', 'q_raw', 'k_raw', 'v_raw', 'alpha_beta', 'q_conv', 'k_conv', 'v', 'q', 'k'], ops: ['proj_q', 'proj_k', 'proj_v', 'proj_ab', 'conv_q', 'conv_k', 'conv_v', 'norm_q', 'norm_k'], desc: 'Queries, keys, and values receive short local convolution. L2-normalized q and k address the associative memory; α controls forgetting and β controls targeted replacement.' },
+            { label: 'FIXED-SIZE ASSOCIATIVE STATE', color: '#16a085', padTop: 36, tensors: ['conv_state', 'S_prev', 'S_next', 'y'], ops: ['delta_update', 'state_read'], desc: `Each request retains the Q/K/V convolution history plus n_h matrix states of shape [d_v, d_k] = [${d_v}, ${d_k}]. The state is independent of context length S; processing cost is linear in the number of new tokens.` },
+            { label: 'OUTPUT GATE', color: '#e67e22', padTop: 36, tensors: ['W_G', 'gate', 'y_gate', 'y_flat', 'W_O', 'out'], ops: ['proj_g', 'norm_gate', 'view_out', 'out_proj'], desc: 'The retrieved values are normalized, gated, merged across heads, and projected to the residual width.' },
+        ],
+    };
+}
 
 // --- MHA ---
 

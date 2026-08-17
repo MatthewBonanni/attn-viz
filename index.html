@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Attention Visualizer</title>
+<title>Attention & Linear Mixer Visualizer</title>
 
 <!-- Open Graph -->
-<meta property="og:title" content="Attention Visualizer — Interactive Attention Mechanism Explorer">
-<meta property="og:description" content="Explore how attention works in transformers with interactive visualizations of MHA, GQA, MQA, MLA, FlashAttention, and PagedAttention.">
+<meta property="og:title" content="Attention & Linear Mixer Visualizer">
+<meta property="og:description" content="Explore tensor-level diagrams of attention and linear recurrent sequence mixers, from MHA and MLA to Mamba and Gated DeltaNet.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://matthewbonanni.github.io/attn-viz/">
 <meta property="og:image" content="https://matthewbonanni.github.io/attn-viz/static/preview.png">
 
 <!-- Twitter/X card -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Attention Visualizer — Interactive Attention Mechanism Explorer">
-<meta name="twitter:description" content="Explore how attention works in transformers with interactive visualizations of MHA, GQA, MQA, MLA, FlashAttention, and PagedAttention.">
+<meta name="twitter:title" content="Attention & Linear Mixer Visualizer">
+<meta name="twitter:description" content="Explore tensor-level diagrams of attention and linear recurrent sequence mixers, from MHA and MLA to Mamba and Gated DeltaNet.">
 <meta name="twitter:image" content="https://matthewbonanni.github.io/attn-viz/static/preview.png">
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -30,14 +30,16 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 #controls h1 { font-size: 16px; font-weight: 600; color: #fff; letter-spacing: -0.3px; }
 #controls h2 { font-size: 10px; font-weight: 500; color: #666; text-transform: uppercase; letter-spacing: 0.8px; margin-top: 4px; }
 
-/* Variant tabs */
-#variant-tabs { display: flex; gap: 3px; }
-#variant-tabs button {
+/* Mechanism family + variant tabs */
+#family-tabs, #variant-tabs { display: flex; gap: 3px; }
+#family-tabs { margin-bottom: 4px; }
+#family-tabs button, #variant-tabs button {
     flex: 1; padding: 7px 2px; border: 1px solid #2a2d3a; background: #1e2030;
     color: #aaa; font-size: 11px; font-weight: 600; cursor: pointer;
     border-radius: 5px; transition: all 0.15s;
 }
-#variant-tabs button:hover { background: #252840; color: #ddd; }
+#family-tabs button:hover, #variant-tabs button:hover { background: #252840; color: #ddd; }
+#family-tabs button.active { background: #2f3550; border-color: #5b6abf; color: #fff; }
 #variant-tabs button.active { background: #3b5bdb; border-color: #3b5bdb; color: #fff; }
 
 /* Variant description */
@@ -306,9 +308,10 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
 <body>
 
 <div id="controls">
-    <h1>Attention Visualizer</h1>
+    <h1>Attention & Linear Mixer Visualizer</h1>
 
-    <h2>Variant</h2>
+    <h2>Mechanism</h2>
+    <div id="family-tabs"></div>
     <div id="variant-tabs"></div>
     <div id="dsv4-mode"></div>
     <div id="variant-desc"></div>
@@ -322,7 +325,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
             <div class="toggle-switch" id="toggle-flash"></div>
         </div>
         <div class="toggle-row">
-            <label>PagedAttention</label>
+            <label id="paged-toggle-label">PagedAttention</label>
             <div class="toggle-switch" id="toggle-paged"></div>
         </div>
     </div>
@@ -361,6 +364,7 @@ body { font-family: 'Inter', system-ui, -apple-system, sans-serif; display: flex
         <div class="legend-item"><div class="legend-swatch" style="background:#9b59b6"></div>Attention scores</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#1abc9c"></div>Causal mask</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#e67e22"></div>Latent / compressed</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:#16a085"></div>Recurrent state</div>
         <div class="legend-item"><div class="legend-swatch" style="background:#ff7043"></div>RoPE (positional)</div>
         <div id="how-to-read">
             <details>

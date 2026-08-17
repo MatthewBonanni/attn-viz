@@ -7,6 +7,7 @@
 export const URL_KEYS = [
     'B', 'S', 'S_q', 'd_model', 'n_h', 'd_h', 'n_kv', 'd_c', 'd_q', 'd_r',
     'topk', 'n_i', 'd_i', 'tp_size', 'dp_size', 'block_size', 'window_size',
+    'd_state', 'd_conv', 'expand', 'expand_v',
 ];
 
 // short URL key → params key

@@ -421,6 +421,46 @@ export function computeOpCost(op, tensorMap, context = {}) {
             return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
         }
 
+        case 'shortconv': {
+            const elements = tensorElementInfo(output, context).elements;
+            const width = Math.max(1, op.convWidth || 1);
+            const flops = elements * (2 * width + 4);
+            return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
+        }
+
+        case 'normalize':
+        case 'elementwise': {
+            const elements = tensorElementInfo(output, context).elements;
+            const flops = elements * (op.flopsPerElement || (op.type === 'normalize' ? 5 : 1));
+            return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
+        }
+
+        case 'selective_state_update':
+        case 'gated_delta_update': {
+            const state = inputs.find(t => t.state);
+            if (!state) return null;
+            const workload = normalizedWorkload(context);
+            const tokenCount = selectedRankWork(perRequestWork('q', context), workload);
+            const stateElementsPerRequest = tensorElements(state.shape) / workload.B;
+            const flopsPerStateElement = op.type === 'gated_delta_update' ? 6 : 5;
+            const flops = tokenCount * stateElementsPerRequest * flopsPerStateElement;
+            return finish(flops, [...inputs.map(t => readItem(t)), writeItem(output)]);
+        }
+
+        case 'state_read': {
+            const state = inputs.find(t => t.state);
+            if (!state) return null;
+            const workload = normalizedWorkload(context);
+            const tokenCount = selectedRankWork(perRequestWork('q', context), workload);
+            const stateElementsPerRequest = tensorElements(state.shape) / workload.B;
+            const outputElements = tensorElementInfo(output, context).elements;
+            const flops = 2 * tokenCount * stateElementsPerRequest + 2 * outputElements;
+            // The evolving state remains inside the scan kernel. Count its HBM
+            // transfer on the update op, not again on this conceptual read.
+            const nonStateInputs = inputs.filter(t => !t.state);
+            return finish(flops, [...nonStateInputs.map(t => readItem(t)), writeItem(output)]);
+        }
+
         case 'add': {
             const elements = tensorElementInfo(output, context).elements;
             const flops = elements;
